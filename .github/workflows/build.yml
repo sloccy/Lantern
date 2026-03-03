@@ -9,7 +9,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Becomes e.g. ghcr.io/brendan/homelabhomepage
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -48,7 +47,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── 4. Image tags ─────────────────────────────────────────────────────
+      # ── 4. Image tags & labels ────────────────────────────────────────────
       # Produces tags like:
       #   latest           (default branch only)
       #   main / master    (branch push)
@@ -67,6 +66,11 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=Launchpad
+            org.opencontainers.image.description=Homelab reverse proxy, service discovery & homepage
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.source=https://github.com/sloccy/HomelabHomepage
 
       # ── 5. Build & push ───────────────────────────────────────────────────
       - name: Build and push

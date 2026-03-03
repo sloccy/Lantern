@@ -40,7 +40,8 @@ LABEL org.opencontainers.image.title="Launchpad" \
       org.opencontainers.image.description="Homelab reverse proxy, service discovery & homepage" \
       org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.revision="${BUILD_COMMIT}" \
-      org.opencontainers.image.source="https://github.com/brendan/HomelabHomepage"
+      org.opencontainers.image.source="https://github.com/sloccy/HomelabHomepage" \
+      org.opencontainers.image.licenses="MIT"
 
 # Ports: 80 (HTTP → HTTPS redirect), 443 (HTTPS proxy + GUI).
 # NET_BIND_SERVICE capability required when running as nonroot — see docker-compose.yml.
