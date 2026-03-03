@@ -1,4 +1,4 @@
-# Launchpad
+# Atlas
 
 A self-contained Go reverse proxy, service discovery tool, and homelab homepage. Runs as a single Docker container.
 
@@ -22,7 +22,7 @@ SCAN_INTERVAL: "24h"        # Network scan interval (Go duration)
 docker compose up -d --build
 ```
 
-The Launchpad GUI will be available at `https://launchpad.sloccy.com`.
+The Atlas GUI will be available at `https://atlas.sloccy.com`.
 
 ---
 
@@ -66,7 +66,7 @@ The Launchpad GUI will be available at `https://launchpad.sloccy.com`.
 
 ```bash
 go mod tidy
-go build -o launchpad .
+go build -o atlas .
 ```
 
 Requires Go 1.22+.
@@ -89,34 +89,34 @@ Requires Go 1.22+.
 
 ## Docker Labels
 
-Add labels to any container to control how Launchpad discovers it:
+Add labels to any container to control how Atlas discovers it:
 
 ```yaml
 services:
   plex:
     image: plexinc/pms-docker
     labels:
-      launchpad.name: "Plex Media Server"
-      launchpad.subdomain: "plex"
-      launchpad.port: "32400"        # non-standard port
-      # launchpad.scheme: "https"    # optional, auto-detected for 443/8443/9443
-      # launchpad.url: "http://10.0.0.5:32400"  # fully explicit target
-      # launchpad.enable: "false"    # opt out entirely
+      atlas.name: "Plex Media Server"
+      atlas.subdomain: "plex"
+      atlas.port: "32400"        # non-standard port
+      # atlas.scheme: "https"    # optional, auto-detected for 443/8443/9443
+      # atlas.url: "http://10.0.0.5:32400"  # fully explicit target
+      # atlas.enable: "false"    # opt out entirely
 
   sonarr:
     image: linuxserver/sonarr
     labels:
-      launchpad.port: "8989"
+      atlas.port: "8989"
 ```
 
 **Label priority (highest → lowest):**
-1. `launchpad.url` — explicit target, skips all other port logic
-2. `launchpad.port` — use this port on SERVER_IP
+1. `atlas.url` — explicit target, skips all other port logic
+2. `atlas.port` — use this port on SERVER_IP
 3. `traefik.http.services.<n>.loadbalancer.server.port` — Traefik compatibility
 4. Published port fallback (any published TCP port)
 
 **Traefik label compatibility** — if your containers already have Traefik labels,
-Launchpad reads them automatically:
+Atlas reads them automatically:
 
 ```yaml
 labels:

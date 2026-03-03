@@ -1,7 +1,7 @@
 services:
-  launchpad:
+  atlas:
     build: .
-    container_name: launchpad
+    container_name: atlas
     restart: unless-stopped
 
     # Allow binding to ports 80 and 443 as non-root.
@@ -14,7 +14,7 @@ services:
 
     volumes:
       # Persistent data: config, certs, ACME account keys.
-      - launchpad_data:/data
+      - atlas_data:/data
       # Docker socket for container discovery.
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
@@ -47,5 +47,5 @@ services:
       start_period: 15s
 
 volumes:
-  launchpad_data:
+  atlas_data:
     driver: local

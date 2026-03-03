@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"launchpad/internal/cf"
-	"launchpad/internal/config"
-	"launchpad/internal/store"
+	"atlas/internal/cf"
+	"atlas/internal/config"
+	"atlas/internal/store"
 )
 
 //go:embed static

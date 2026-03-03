@@ -13,7 +13,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	dockerclient "github.com/docker/docker/client"
 
-	"launchpad/internal/store"
+	"atlas/internal/store"
 )
 
 // DockerWatch connects to the Docker socket and watches for container start/stop events.
@@ -22,12 +22,12 @@ import (
 //
 // Label reference (set on the container):
 //
-//	launchpad.enable=false          — opt this container out entirely
-//	launchpad.name=Plex             — display name override
-//	launchpad.subdomain=plex        — subdomain override (default: container name)
-//	launchpad.port=32400            — port to use instead of the published port
-//	launchpad.scheme=https          — force https for the backend target
-//	launchpad.url=http://10.0.0.5:32400 — fully explicit target (overrides all above)
+//	atlas.enable=false          — opt this container out entirely
+//	atlas.name=Plex             — display name override
+//	atlas.subdomain=plex        — subdomain override (default: container name)
+//	atlas.port=32400            — port to use instead of the published port
+//	atlas.scheme=https          — force https for the backend target
+//	atlas.url=http://10.0.0.5:32400 — fully explicit target (overrides all above)
 //
 // Traefik v2/v3 labels are also understood as a fallback:
 //
@@ -116,11 +116,11 @@ type containerInfo struct {
 // upsertContainerWithLabels resolves a container's configuration from Docker labels,
 // then creates or updates the service entry.
 func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name string, ports []dockertypes.Port, labels map[string]string) {
-	if name == "" || name == "launchpad" {
+	if name == "" || name == "atlas" {
 		return
 	}
-	// launchpad.enable=false → opt out.
-	if labels["launchpad.enable"] == "false" {
+	// atlas.enable=false → opt out.
+	if labels["atlas.enable"] == "false" {
 		return
 	}
 	// Skip if already tracked.
@@ -167,7 +167,7 @@ func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name str
 
 // resolveContainer determines the display name, subdomain and target URL for a container
 // by checking labels in priority order:
-//  1. launchpad.* labels
+//  1. atlas.* labels
 //  2. Traefik v2/v3 labels
 //  3. Published ports (bestPort heuristic)
 func (d *Discoverer) resolveContainer(name string, ports []dockertypes.Port, labels map[string]string) *containerInfo {
@@ -177,29 +177,29 @@ func (d *Discoverer) resolveContainer(name string, ports []dockertypes.Port, lab
 	}
 
 	// Display name override.
-	if n := labels["launchpad.name"]; n != "" {
+	if n := labels["atlas.name"]; n != "" {
 		info.name = n
 	}
 
 	// Explicit target URL — takes full precedence over port logic.
-	if u := labels["launchpad.url"]; u != "" {
+	if u := labels["atlas.url"]; u != "" {
 		info.target = u
-		if s := labels["launchpad.subdomain"]; s != "" {
+		if s := labels["atlas.subdomain"]; s != "" {
 			info.subdomain = sanitiseSubdomain(s)
 		}
 		return info
 	}
 
-	// Subdomain: launchpad label > traefik rule > container name.
-	if s := labels["launchpad.subdomain"]; s != "" {
+	// Subdomain: atlas label > traefik rule > container name.
+	if s := labels["atlas.subdomain"]; s != "" {
 		info.subdomain = sanitiseSubdomain(s)
 	} else if sub := traefikSubdomain(labels, d.cfg.Domain); sub != "" {
 		info.subdomain = sub
 	}
 
-	// Port: launchpad.port > traefik service port > bestPort(published).
+	// Port: atlas.port > traefik service port > bestPort(published).
 	port := 0
-	if p := labels["launchpad.port"]; p != "" {
+	if p := labels["atlas.port"]; p != "" {
 		fmt.Sscanf(p, "%d", &port)
 	}
 	if port == 0 {
@@ -214,7 +214,7 @@ func (d *Discoverer) resolveContainer(name string, ports []dockertypes.Port, lab
 
 	// Scheme: explicit label > port heuristic.
 	scheme := "http"
-	if s := labels["launchpad.scheme"]; s == "https" || s == "http" {
+	if s := labels["atlas.scheme"]; s == "https" || s == "http" {
 		scheme = s
 	} else if port == 443 || port == 8443 || port == 9443 {
 		scheme = "https"

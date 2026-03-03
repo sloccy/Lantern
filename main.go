@@ -10,14 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"launchpad/internal/certs"
-	"launchpad/internal/cf"
-	"launchpad/internal/config"
-	"launchpad/internal/ddns"
-	"launchpad/internal/discovery"
-	"launchpad/internal/proxy"
-	"launchpad/internal/store"
-	"launchpad/internal/web"
+	"atlas/internal/certs"
+	"atlas/internal/cf"
+	"atlas/internal/config"
+	"atlas/internal/ddns"
+	"atlas/internal/discovery"
+	"atlas/internal/proxy"
+	"atlas/internal/store"
+	"atlas/internal/web"
 )
 
 // Injected at build time via -ldflags "-X main.version=... -X main.commit=..."
@@ -28,7 +28,7 @@ var (
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
-	log.SetPrefix("[launchpad] ")
+	log.SetPrefix("[atlas] ")
 
 	cfg, err := config.Load()
 	if err != nil {

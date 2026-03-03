@@ -10,7 +10,7 @@ README.md
 *.md
 
 # Local dev artifacts
-launchpad
+atlas
 *.exe
 *.test
 

@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath \
       -ldflags="-s -w -X main.version=${BUILD_VERSION} -X main.commit=${BUILD_COMMIT}" \
-      -o launchpad .
+      -o atlas .
 
 # ── Stage 2: final ────────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot
@@ -31,12 +31,12 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Binary.
-COPY --from=builder /build/launchpad /launchpad
+COPY --from=builder /build/atlas /atlas
 
 # OCI image labels (populated by docker/metadata-action in CI).
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=unknown
-LABEL org.opencontainers.image.title="Launchpad" \
+LABEL org.opencontainers.image.title="Atlas" \
       org.opencontainers.image.description="Homelab reverse proxy, service discovery & homepage" \
       org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.revision="${BUILD_COMMIT}" \
@@ -47,4 +47,4 @@ LABEL org.opencontainers.image.title="Launchpad" \
 # NET_BIND_SERVICE capability required when running as nonroot — see docker-compose.yml.
 EXPOSE 80 443
 
-ENTRYPOINT ["/launchpad"]
+ENTRYPOINT ["/atlas"]

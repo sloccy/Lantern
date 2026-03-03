@@ -1,4 +1,4 @@
-/* ── Launchpad frontend ─────────────────────────────────────────────────── */
+/* ── Atlas frontend ──────────────────────────────────────────────────────── */
 'use strict';
 
 let currentView = 'home';
@@ -311,18 +311,23 @@ async function loadDiscovered() {
 }
 
 function discItem(d) {
-  const scheme = [443, 8443, 9443].includes(d.port) ? 'https' : 'http';
+  const scheme = [443, 5001, 8443, 8920, 9443].includes(d.port) ? 'https' : 'http';
   const url    = `${scheme}://${d.ip}:${d.port}`;
-  const icon   = d.icon
+  // Emoji icons from fingerprint vs base64 favicons need different rendering.
+  const icon   = d.icon && d.icon.startsWith('data:')
     ? `<img class="svc-icon" src="${esc(d.icon)}" alt="" loading="lazy" onerror="this.style.display='none'">`
-    : `<span class="svc-icon-placeholder">🖥️</span>`;
-  const src = `<span class="tag tag-${d.source}">${d.source}</span>`;
-  const label = d.title || d.container_name || `${d.ip}:${d.port}`;
+    : `<span class="svc-icon-placeholder">${esc(d.icon || '🖥️')}</span>`;
+  const src    = `<span class="tag tag-${d.source}">${d.source}</span>`;
+  // Prefer fingerprinted service name over raw page title.
+  const label  = d.service_name || d.title || d.container_name || `${d.ip}:${d.port}`;
+  const conf   = d.service_name && d.confidence
+    ? ` <span style="font-size:.7rem;color:var(--muted);background:rgba(255,255,255,.06);padding:.1em .4em;border-radius:.25em;margin-left:.35em">${Math.round(d.confidence * 100)}%</span>`
+    : '';
   return `
     <div class="disc-item">
       ${icon}
       <div class="disc-info">
-        <div class="disc-title">${esc(label)}</div>
+        <div class="disc-title">${esc(label)}${conf}</div>
         <div class="disc-meta">${src} <a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a></div>
       </div>
       <div class="disc-actions">

@@ -22,7 +22,7 @@ import (
 	"github.com/go-acme/lego/v4/registration"
 	legocf "github.com/go-acme/lego/v4/providers/dns/cloudflare"
 
-	"launchpad/internal/config"
+	"atlas/internal/config"
 )
 
 // Manager handles TLS certificate lifecycle via Let's Encrypt.

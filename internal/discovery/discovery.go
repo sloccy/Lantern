@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"launchpad/internal/cf"
-	"launchpad/internal/config"
-	"launchpad/internal/store"
+	"atlas/internal/cf"
+	"atlas/internal/config"
+	"atlas/internal/store"
 )
 
 // Discoverer orchestrates both network scanning and Docker watching.
@@ -88,35 +88,44 @@ func (d *Discoverer) Status() (scanning bool, last, next time.Time) {
 func (d *Discoverer) runScan(ctx context.Context) {
 	log.Println("discovery: starting network scan")
 	start := time.Now()
-	results := d.scanNetwork(ctx, d.store.GetScanSubnets())
 
-	var discovered []*store.DiscoveredService
-	for _, r := range results {
+	// Build assigned-targets set once (O(1) lookup per result).
+	assignedTargets := make(map[string]bool)
+	for _, svc := range d.store.GetAllServices() {
+		assignedTargets[svc.Target] = true
+	}
+
+	// Clear old network entries so partial results are visible as they arrive.
+	d.store.ClearNetworkDiscovered()
+
+	ch := d.scanNetwork(ctx, d.store.GetScanSubnets())
+
+	count := 0
+	for r := range ch {
 		// Skip IPs/ports already assigned as services.
-		alreadyAssigned := false
-		for _, svc := range d.store.GetAllServices() {
-			if svc.Target == r.url ||
-				svc.Target == fmt.Sprintf("http://%s:%d", r.ip, r.port) ||
-				svc.Target == fmt.Sprintf("https://%s:%d", r.ip, r.port) {
-				alreadyAssigned = true
-				break
-			}
-		}
-		if alreadyAssigned {
+		if assignedTargets[r.url] ||
+			assignedTargets[fmt.Sprintf("http://%s:%d", r.ip, r.port)] ||
+			assignedTargets[fmt.Sprintf("https://%s:%d", r.ip, r.port)] {
 			continue
 		}
-		discovered = append(discovered, &store.DiscoveredService{
+		d.store.UpsertNetworkDiscovered(&store.DiscoveredService{
 			ID:           newID(),
 			IP:           r.ip,
 			Port:         r.port,
 			Title:        r.title,
 			Icon:         r.icon,
+			ServiceName:  r.serviceName,
+			Confidence:   r.confidence,
 			Source:       "network",
 			DiscoveredAt: time.Now(),
 		})
+		count++
+		// Flush to disk every 10 results so the UI shows partial progress.
+		if count%10 == 0 {
+			_ = d.store.Save()
+		}
 	}
 
-	d.store.ReplaceNetworkDiscovered(discovered)
 	now := time.Now()
 	d.store.SetLastScan(now)
 	_ = d.store.Save()
@@ -127,7 +136,7 @@ func (d *Discoverer) runScan(ctx context.Context) {
 	d.mu.Unlock()
 
 	log.Printf("discovery: scan complete in %s — found %d network services",
-		time.Since(start).Round(time.Second), len(discovered))
+		time.Since(start).Round(time.Second), count)
 }
 
 func newID() string {

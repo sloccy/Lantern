@@ -29,6 +29,8 @@ type DiscoveredService struct {
 	Port          int       `json:"port"`
 	Title         string    `json:"title"`
 	Icon          string    `json:"icon,omitempty"`
+	ServiceName   string    `json:"service_name,omitempty"`
+	Confidence    float32   `json:"confidence,omitempty"`
 	Source        string    `json:"source"` // "docker" | "network"
 	ContainerName string    `json:"container_name,omitempty"`
 	ContainerID   string    `json:"container_id,omitempty"`
@@ -255,6 +257,38 @@ func (s *Store) ReplaceNetworkDiscovered(services []*DiscoveredService) {
 		}
 	}
 	s.d.Discovered = append(dockerOnly, services...)
+}
+
+// ClearNetworkDiscovered removes all network-source discovered entries,
+// preserving Docker-discovered entries. Called at the start of each scan.
+func (s *Store) ClearNetworkDiscovered() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var keep []*DiscoveredService
+	for _, d := range s.d.Discovered {
+		if d.Source != "network" {
+			keep = append(keep, d)
+		}
+	}
+	s.d.Discovered = keep
+}
+
+// UpsertNetworkDiscovered updates an existing network entry by IP+port if found,
+// otherwise appends it. Preserves the existing ID to avoid UI flicker.
+func (s *Store) UpsertNetworkDiscovered(svc *DiscoveredService) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.d.Discovered {
+		if existing.Source == "network" && existing.IP == svc.IP && existing.Port == svc.Port {
+			existing.Title = svc.Title
+			existing.Icon = svc.Icon
+			existing.ServiceName = svc.ServiceName
+			existing.Confidence = svc.Confidence
+			existing.DiscoveredAt = svc.DiscoveredAt
+			return
+		}
+	}
+	s.d.Discovered = append(s.d.Discovered, svc)
 }
 
 // ---- DDNS -------------------------------------------------------------------

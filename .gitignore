@@ -1,5 +1,5 @@
 # Compiled binary
-launchpad
+atlas
 *.exe
 
 # Local data (certs, config, ACME keys)
