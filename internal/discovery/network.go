@@ -597,85 +597,157 @@ type probeResult struct {
 	confidence  float32
 }
 
-// scanNetwork runs a TCP sweep followed by HTTP probing on open ports only.
+// scanNetwork discovers services via four concurrent paths:
+//  1. TCP sweep across configured subnets, then HTTP probe open ports.
+//     An ARP pre-sweep (Linux + CAP_NET_RAW) narrows the host list first.
+//  2. mDNS (DNS-SD) — finds services advertising on the local multicast group
+//  3. SSDP — finds UPnP/DLNA devices via 239.255.255.250:1900
+//  4. WS-Discovery — finds ONVIF cameras, printers, and Windows devices via
+//     239.255.255.250:3702
+//
 // Results are streamed over the returned channel as they arrive.
+// Deduplication by IP:port happens in the store layer (UpsertNetworkDiscovered).
 func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string) <-chan *probeResult {
 	ch := make(chan *probeResult, 64)
 
 	go func() {
 		defer close(ch)
 
-		// Parse CIDRs or fall back to auto-detect.
-		var nets []*net.IPNet
-		if len(cidrs) == 0 {
-			subnet, err := getLocalSubnet()
-			if err != nil {
-				log.Printf("discovery: get subnet: %v", err)
-				return
-			}
-			nets = []*net.IPNet{subnet}
-		} else {
-			for _, cidr := range cidrs {
-				_, ipnet, err := net.ParseCIDR(cidr)
+		var outerWg sync.WaitGroup
+
+		// ── Path 1: TCP sweep → HTTP probe ──────────────────────────────────
+		outerWg.Add(1)
+		go func() {
+			defer outerWg.Done()
+
+			// Parse CIDRs or fall back to auto-detect.
+			var nets []*net.IPNet
+			if len(cidrs) == 0 {
+				subnet, err := getLocalSubnet()
 				if err != nil {
-					log.Printf("discovery: invalid subnet %q: %v", cidr, err)
-					continue
+					log.Printf("discovery: get subnet: %v", err)
+					return
 				}
-				nets = append(nets, ipnet)
+				nets = []*net.IPNet{subnet}
+			} else {
+				for _, cidr := range cidrs {
+					_, ipnet, err := net.ParseCIDR(cidr)
+					if err != nil {
+						log.Printf("discovery: invalid subnet %q: %v", cidr, err)
+						continue
+					}
+					nets = append(nets, ipnet)
+				}
+				if len(nets) == 0 {
+					return
+				}
 			}
-			if len(nets) == 0 {
+
+			seen := make(map[string]bool)
+			var ips []string
+			for _, subnet := range nets {
+				hosts := generateIPs(subnet)
+				log.Printf("discovery: subnet %s — %d hosts", subnet, len(hosts))
+				for _, ip := range hosts {
+					if !seen[ip] {
+						seen[ip] = true
+						ips = append(ips, ip)
+					}
+				}
+			}
+
+			// ARP pre-sweep: quickly find live hosts before the full TCP sweep.
+			// On Linux with CAP_NET_RAW this can dramatically reduce scan time
+			// by skipping 750 ms timeouts for dead IPs.
+			if liveHosts := arpSweep(ctx, ips, time.Second); len(liveHosts) > 0 {
+				var alive []string
+				for _, ip := range ips {
+					if liveHosts[ip] {
+						alive = append(alive, ip)
+					}
+				}
+				log.Printf("discovery: arp: %d/%d hosts live — TCP sweep narrowed",
+					len(alive), len(ips))
+				ips = alive
+			}
+
+			log.Printf("discovery: TCP sweep — %d hosts × %d ports (%d pairs)",
+				len(ips), len(scanPorts), len(ips)*len(scanPorts))
+			open := tcpSweep(ctx, ips, scanPorts)
+			log.Printf("discovery: TCP sweep done — %d open ports", len(open))
+
+			if len(open) == 0 || ctx.Err() != nil {
 				return
 			}
-		}
 
-		// Collect all unique host IPs across all subnets.
-		seen := make(map[string]bool)
-		var ips []string
-		for _, subnet := range nets {
-			hosts := generateIPs(subnet)
-			log.Printf("discovery: subnet %s — %d hosts", subnet, len(hosts))
-			for _, ip := range hosts {
-				if !seen[ip] {
-					seen[ip] = true
-					ips = append(ips, ip)
+			jobs := make(chan openPort, len(open))
+			for _, op := range open {
+				jobs <- op
+			}
+			close(jobs)
+
+			const httpWorkers = 80
+			var wg sync.WaitGroup
+			for i := 0; i < httpWorkers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for op := range jobs {
+						if ctx.Err() != nil {
+							return
+						}
+						if r := probeHTTP(ctx, op.ip, op.port); r != nil {
+							ch <- r
+						}
+					}
+				}()
+			}
+			wg.Wait()
+		}()
+
+		// ── Path 2: mDNS (DNS-SD) ────────────────────────────────────────────
+		outerWg.Add(1)
+		go func() {
+			defer outerWg.Done()
+			for _, op := range discoverMDNS(ctx, 4*time.Second) {
+				if ctx.Err() != nil {
+					return
+				}
+				if r := probeHTTP(ctx, op.ip, op.port); r != nil {
+					ch <- r
 				}
 			}
-		}
+		}()
 
-		// Stage 1: TCP sweep — fast filter, no HTTP overhead.
-		log.Printf("discovery: TCP sweep — %d hosts × %d ports (%d pairs)",
-			len(ips), len(scanPorts), len(ips)*len(scanPorts))
-		open := tcpSweep(ctx, ips, scanPorts)
-		log.Printf("discovery: TCP sweep done — %d open ports", len(open))
-
-		if len(open) == 0 || ctx.Err() != nil {
-			return
-		}
-
-		// Stage 2: HTTP probe on open ports only (80 workers).
-		jobs := make(chan openPort, len(open))
-		for _, op := range open {
-			jobs <- op
-		}
-		close(jobs)
-
-		const httpWorkers = 80
-		var wg sync.WaitGroup
-		for i := 0; i < httpWorkers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for op := range jobs {
-					if ctx.Err() != nil {
-						return
-					}
-					if r := probeHTTP(ctx, op.ip, op.port); r != nil {
-						ch <- r
-					}
+		// ── Path 3: SSDP (UPnP) ─────────────────────────────────────────────
+		outerWg.Add(1)
+		go func() {
+			defer outerWg.Done()
+			for _, op := range discoverSSDP(ctx, 4*time.Second) {
+				if ctx.Err() != nil {
+					return
 				}
-			}()
-		}
-		wg.Wait()
+				if r := probeHTTP(ctx, op.ip, op.port); r != nil {
+					ch <- r
+				}
+			}
+		}()
+
+		// ── Path 4: WS-Discovery (ONVIF cameras, printers, Windows) ─────────
+		outerWg.Add(1)
+		go func() {
+			defer outerWg.Done()
+			for _, op := range discoverWSDiscovery(ctx, 4*time.Second) {
+				if ctx.Err() != nil {
+					return
+				}
+				if r := probeHTTP(ctx, op.ip, op.port); r != nil {
+					ch <- r
+				}
+			}
+		}()
+
+		outerWg.Wait()
 	}()
 
 	return ch
