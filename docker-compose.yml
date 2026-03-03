@@ -1,0 +1,51 @@
+services:
+  launchpad:
+    build: .
+    container_name: launchpad
+    restart: unless-stopped
+
+    # Allow binding to ports 80 and 443 as non-root.
+    cap_add:
+      - NET_BIND_SERVICE
+
+    ports:
+      - "80:80"
+      - "443:443"
+
+    volumes:
+      # Persistent data: config, certs, ACME account keys.
+      - launchpad_data:/data
+      # Docker socket for container discovery.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+    environment:
+      # Your root domain. Wildcard cert will cover *.sloccy.com
+      DOMAIN: sloccy.com
+
+      # Cloudflare API token with Zone:DNS:Edit permission for your zone.
+      CF_API_TOKEN: ""
+
+      # Cloudflare Zone ID (found in the zone overview page).
+      CF_ZONE_ID: ""
+
+      # Local IP of this server — used for DNS A records.
+      SERVER_IP: "10.0.0.5"
+
+      # Data directory inside the container (maps to the volume above).
+      DATA_DIR: /data
+
+      # How often to run a network scan. Accepts Go duration strings.
+      # Examples: 24h, 12h, 6h, 30m
+      SCAN_INTERVAL: "24h"
+
+    # Health check: verify the HTTP redirect is responding.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  launchpad_data:
+    driver: local

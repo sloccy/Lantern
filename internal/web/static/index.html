@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Launchpad</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════ HOME VIEW ══ -->
+<div id="view-home" class="view">
+  <header class="header">
+    <div class="logo">
+      <span class="logo-icon">🚀</span>
+      <span class="logo-text">Launchpad</span>
+    </div>
+    <button class="btn btn-ghost" onclick="showView('manage')">⚙ Manage</button>
+  </header>
+  <main id="services-grid" class="grid"></main>
+  <div id="home-empty" class="empty-state" style="display:none">
+    <div class="empty-icon">🚀</div>
+    <h2>Welcome to Launchpad</h2>
+    <p>No services assigned yet. Add services from the manage view.</p>
+    <button class="btn btn-primary" onclick="showView('manage')">Get Started →</button>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════ MANAGE VIEW ══ -->
+<div id="view-manage" class="view" style="display:none">
+  <header class="header">
+    <div class="logo">
+      <span class="logo-icon">🚀</span>
+      <span class="logo-text">Launchpad</span>
+      <span class="badge">Manage</span>
+    </div>
+    <button class="btn btn-ghost" onclick="showView('home')">← Home</button>
+  </header>
+
+  <main class="manage-container">
+
+    <!-- Status -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">Status</h2>
+        <button class="btn btn-primary" id="scan-btn" onclick="triggerScan()">⟳ Scan Now</button>
+      </div>
+      <div id="status-grid" class="status-grid"></div>
+    </section>
+
+    <!-- Assigned Services -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">Services</h2>
+        <button class="btn btn-primary" onclick="showAddManualModal()">+ Add Service</button>
+      </div>
+      <div id="services-list"></div>
+    </section>
+
+    <!-- Discovered -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">Discovered</h2>
+        <span id="discovered-count" class="count-badge"></span>
+      </div>
+      <p class="section-desc">Services found by network scan or Docker that haven't been assigned a subdomain.</p>
+      <div id="discovered-list"></div>
+    </section>
+
+    <!-- Dynamic DNS -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">Dynamic DNS</h2>
+        <button class="btn btn-primary" onclick="showAddDDNSModal()">+ Add Domain</button>
+      </div>
+      <p class="section-desc">These domains will automatically update to your current public IP address.</p>
+      <div id="ddns-list"></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ══════════════════════════════════════════ MODAL ══ -->
+<div id="modal-backdrop" class="modal-backdrop" style="display:none" onclick="closeModal()">
+  <div class="modal" onclick="event.stopPropagation()">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast" style="display:none"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
