@@ -4,11 +4,16 @@ services:
     container_name: atlas
     restart: unless-stopped
 
-    # Allow binding to ports 80/443 as non-root, and raw socket access for
-    # ARP pre-sweep (faster network scanning) and mDNS/WS-Discovery multicast.
+    # Raw socket access for ARP pre-sweep (faster network scanning) and mDNS/WS-Discovery multicast.
+    # NET_BIND_SERVICE is not needed here — port 80/443 binding is handled via a file capability
+    # set on the binary at build time (setcap cap_net_bind_service=+ep).
     cap_add:
-      - NET_BIND_SERVICE
       - NET_RAW
+
+    # Add the host's docker group so the nonroot user can access /var/run/docker.sock.
+    # Find the GID with: stat -c '%g' /var/run/docker.sock
+    group_add:
+      - "1000"
 
     # Use host networking for mDNS and WS-Discovery multicast support.
     # Without this, mDNS (port 5353) and WS-Discovery (port 3702) are blocked
@@ -48,7 +53,7 @@ services:
       # Examples: 24h, 12h, 6h, 30m
       SCAN_INTERVAL: "24h"
 
-    # Health check: verify the HTTP redirect is responding.
+    # Health check: verify the HTTP server is responding.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost/healthz || exit 1"]
       interval: 30s
