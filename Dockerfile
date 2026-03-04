@@ -27,11 +27,13 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -ldflags="-s -w -X main.version=${BUILD_VERSION} -X main.commit=${BUILD_COMMIT}" \
       -o atlas .
 
-# Grant the binary the ability to bind to privileged ports (80/443) as a non-root user.
-# File capabilities are preserved by COPY into the final image, so no cap_add is needed at runtime.
+# Grant the binary privileged capabilities as a non-root user:
+#   cap_net_bind_service — bind to ports 80/443
+#   cap_net_raw          — raw sockets for ARP pre-sweep (faster network scanning)
+# File capabilities are preserved by COPY into the final image.
 RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends libcap2-bin && \
-    setcap 'cap_net_bind_service=+ep' /build/atlas
+    setcap 'cap_net_bind_service=+ep cap_net_raw=+ep' /build/atlas
 
 # ── Stage 2: final ────────────────────────────────────────────────────────────
 FROM gcr.io/distroless/static-debian12:nonroot
