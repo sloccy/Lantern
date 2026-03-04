@@ -151,7 +151,7 @@ func findIfaceForIP(infos []ifaceInfo, target net.IP) *ifaceInfo {
 }
 
 // buildARPRequest crafts a raw Ethernet+ARP request frame (42 bytes).
-func buildARPRequest(srcMAC, srcIP, dstIP net.IP) []byte {
+func buildARPRequest(srcMAC net.HardwareAddr, srcIP, dstIP net.IP) []byte {
 	pkt := make([]byte, 42)
 	// Ethernet header
 	pkt[0], pkt[1], pkt[2], pkt[3], pkt[4], pkt[5] = 0xff, 0xff, 0xff, 0xff, 0xff, 0xff // dst: broadcast
