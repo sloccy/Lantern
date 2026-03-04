@@ -33,9 +33,10 @@ func (d *Discoverer) logf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	log.Println(msg)
 	d.mu.Lock()
-	d.logLines = append(d.logLines, msg)
-	if len(d.logLines) > 30 {
-		d.logLines = d.logLines[len(d.logLines)-30:]
+	ts := time.Now().Format("15:04:05")
+	d.logLines = append(d.logLines, ts+" "+msg)
+	if len(d.logLines) > 200 {
+		d.logLines = d.logLines[len(d.logLines)-200:]
 	}
 	d.mu.Unlock()
 }
@@ -149,8 +150,15 @@ func (d *Discoverer) runScan(ctx context.Context) {
 	d.logLines = nil
 	d.mu.Unlock()
 
-	d.logf("Starting network scan…")
+	d.logf("Starting full network scan…")
 	start := time.Now()
+
+	subnets := d.store.GetScanSubnets()
+	if len(subnets) > 0 {
+		d.logf("Using configured subnets: %v", subnets)
+	} else {
+		d.logf("No subnets configured — will auto-detect from local interfaces")
+	}
 
 	// Build assigned-targets set once (O(1) lookup per result).
 	// Store both the raw target and a trailing-slash-stripped form so either
@@ -160,11 +168,12 @@ func (d *Discoverer) runScan(ctx context.Context) {
 		assignedTargets[svc.Target] = true
 		assignedTargets[strings.TrimRight(svc.Target, "/")] = true
 	}
+	d.logf("Skipping %d already-assigned service targets", len(assignedTargets)/2)
 
 	// Clear old network entries so partial results are visible as they arrive.
 	d.store.ClearNetworkDiscovered()
 
-	ch := d.scanNetwork(ctx, d.store.GetScanSubnets(), true)
+	ch := d.scanNetwork(ctx, subnets, true)
 
 	count := 0
 	for r := range ch {

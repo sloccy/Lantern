@@ -498,8 +498,8 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 					n := done.Add(1)
 					prev := (n - 1) * 100 / total
 					curr := n * 100 / total
-					if curr/25 > prev/25 && curr < 100 {
-						logf("TCP sweep: %d%% complete", (curr/25)*25)
+					if curr/10 > prev/10 && curr < 100 {
+						logf("TCP sweep: %d%% complete (%d/%d)", (curr/10)*10, n, total)
 					}
 				}
 			}
@@ -531,22 +531,30 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 // carry wide masks (/16) that would cause the scanner to probe tens of
 // thousands of hosts. The result is capped at /24 as a safety net against
 // accidentally scanning large cloud or VPN subnets.
-func getLocalSubnet() (*net.IPNet, error) {
+// logf is called to report why each interface is skipped or selected.
+func getLocalSubnet(logf func(string, ...any)) (*net.IPNet, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return nil, err
 	}
+	logf("Interface scan: %d interfaces found", len(ifaces))
 	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+		if iface.Flags&net.FlagLoopback != 0 {
+			continue // silently skip loopback
+		}
+		if iface.Flags&net.FlagUp == 0 {
+			logf("  %s: skip (down)", iface.Name)
 			continue
 		}
 		// Skip Docker bridge and virtual ethernet interfaces.
 		n := iface.Name
 		if n == "docker0" || strings.HasPrefix(n, "br-") || strings.HasPrefix(n, "veth") {
+			logf("  %s: skip (Docker virtual interface)", iface.Name)
 			continue
 		}
 		addrs, err := iface.Addrs()
 		if err != nil {
+			logf("  %s: skip (addrs error: %v)", iface.Name, err)
 			continue
 		}
 		for _, addr := range addrs {
@@ -560,16 +568,20 @@ func getLocalSubnet() (*net.IPNet, error) {
 			}
 			ones, bits := ipnet.Mask.Size()
 			if ones == 0 || bits != 32 {
+				logf("  %s: skip (non-IPv4 or /0 mask)", iface.Name)
 				continue
 			}
 			// Cap at /24: don't scan more than 254 hosts when the interface
 			// has a wide mask (e.g. /8 or /16 on cloud or VPN networks).
 			if ones < 24 {
+				logf("  %s: mask /%d is wider than /24, capping to /24", iface.Name, ones)
 				ones = 24
 			}
 			_, subnet, _ := net.ParseCIDR(fmt.Sprintf("%s/%d", ip4, ones))
+			logf("  %s: selected → %s", iface.Name, subnet)
 			return subnet, nil
 		}
+		logf("  %s: skip (no suitable IPv4 address)", iface.Name)
 	}
 	return nil, fmt.Errorf("no suitable network interface found")
 }
@@ -665,7 +677,7 @@ func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string, withTCP bo
 				// Parse CIDRs or fall back to auto-detect.
 				var nets []*net.IPNet
 				if len(cidrs) == 0 {
-					subnet, err := getLocalSubnet()
+					subnet, err := getLocalSubnet(d.logf)
 					if err != nil {
 						d.logf("Failed to detect local subnet: %v", err)
 						return

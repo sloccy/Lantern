@@ -54,12 +54,17 @@ services:
       SCAN_INTERVAL: "24h"
 
     # Health check: distroless has no shell/wget, so the binary handles its own probe.
+    # Use block YAML list format — inline ["CMD",...] can be misread as CMD-SHELL by
+    # some Docker / Compose versions, causing "no such file: /bin/sh" in distroless.
     healthcheck:
-      test: ["CMD", "/atlas", "healthcheck"]
+      test:
+        - CMD
+        - /atlas
+        - healthcheck
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 30s
 
 volumes:
   atlas_data:
