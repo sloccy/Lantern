@@ -57,8 +57,9 @@ func New(cfg *config.Config, st *store.Store, cfClient *cf.Client) *Discoverer {
 	}
 }
 
-// ScheduledScan runs a network scan on the configured interval.
-// It does NOT scan on startup — first scan is at interval after start.
+// ScheduledScan runs a light discovery (mDNS + SSDP + WS-Discovery) on the
+// configured interval. Full TCP sweeps are manual-only via ScanNow.
+// It does NOT scan on startup — first run is at interval after start.
 func (d *Discoverer) ScheduledScan(ctx context.Context) {
 	d.mu.Lock()
 	d.nextScan = time.Now().Add(d.cfg.ScanInterval)
@@ -66,7 +67,7 @@ func (d *Discoverer) ScheduledScan(ctx context.Context) {
 
 	ticker := time.NewTicker(d.cfg.ScanInterval)
 	defer ticker.Stop()
-	log.Printf("discovery: scheduled scan every %s (first at %s)",
+	log.Printf("discovery: light scan every %s (first at %s)",
 		d.cfg.ScanInterval, d.nextScan.Format(time.RFC3339))
 
 	for {
@@ -74,17 +75,12 @@ func (d *Discoverer) ScheduledScan(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Skip if a manual full scan is running.
 			d.mu.Lock()
 			skip := d.scanning
-			if !skip {
-				d.scanning = true
-			}
 			d.mu.Unlock()
-
-			if skip {
-				log.Println("discovery: scheduled scan skipped — manual scan in progress")
-			} else {
-				d.runScan(ctx)
+			if !skip {
+				d.runLightScan(ctx)
 			}
 
 			d.mu.Lock()
@@ -94,7 +90,7 @@ func (d *Discoverer) ScheduledScan(ctx context.Context) {
 	}
 }
 
-// ScanNow triggers an immediate network scan (called from the API).
+// ScanNow triggers an immediate full network scan (called from the API).
 // Returns immediately if a scan is already in progress.
 func (d *Discoverer) ScanNow(ctx context.Context) {
 	d.mu.Lock()
@@ -107,9 +103,6 @@ func (d *Discoverer) ScanNow(ctx context.Context) {
 
 	go func() {
 		d.runScan(ctx)
-		d.mu.Lock()
-		d.nextScan = time.Now().Add(d.cfg.ScanInterval)
-		d.mu.Unlock()
 	}()
 }
 
@@ -118,6 +111,37 @@ func (d *Discoverer) Status() (scanning bool, last, next time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.scanning, d.lastScan, d.nextScan
+}
+
+// runLightScan runs mDNS, SSDP, and WS-Discovery without a TCP sweep.
+// Used for scheduled background discovery; does not affect d.scanning.
+func (d *Discoverer) runLightScan(ctx context.Context) {
+	assignedTargets := make(map[string]bool)
+	for _, svc := range d.store.GetAllServices() {
+		assignedTargets[svc.Target] = true
+		assignedTargets[strings.TrimRight(svc.Target, "/")] = true
+	}
+
+	ch := d.scanNetwork(ctx, nil, false)
+	for r := range ch {
+		if assignedTargets[r.url] ||
+			assignedTargets[fmt.Sprintf("http://%s:%d", r.ip, r.port)] ||
+			assignedTargets[fmt.Sprintf("https://%s:%d", r.ip, r.port)] {
+			continue
+		}
+		d.store.UpsertNetworkDiscovered(&store.DiscoveredService{
+			ID:           newID(),
+			IP:           r.ip,
+			Port:         r.port,
+			Title:        r.title,
+			Icon:         r.icon,
+			ServiceName:  r.serviceName,
+			Confidence:   r.confidence,
+			Source:       "network",
+			DiscoveredAt: time.Now(),
+		})
+	}
+	_ = d.store.Save()
 }
 
 func (d *Discoverer) runScan(ctx context.Context) {
@@ -140,7 +164,7 @@ func (d *Discoverer) runScan(ctx context.Context) {
 	// Clear old network entries so partial results are visible as they arrive.
 	d.store.ClearNetworkDiscovered()
 
-	ch := d.scanNetwork(ctx, d.store.GetScanSubnets())
+	ch := d.scanNetwork(ctx, d.store.GetScanSubnets(), true)
 
 	count := 0
 	for r := range ch {

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -465,13 +466,17 @@ type openPort struct {
 
 // tcpSweep checks which (ip, port) pairs accept a TCP connection.
 // Uses 256 workers with a 750ms dial timeout — no data exchange.
-func tcpSweep(ctx context.Context, ips []string, ports []int) []openPort {
+// logf is called at ~25 % progress intervals.
+func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, ...any)) []openPort {
 	type job struct {
 		ip   string
 		port int
 	}
 	jobs := make(chan job, 1024)
 	results := make(chan openPort, 256)
+
+	total := int64(len(ips) * len(ports))
+	var done atomic.Int64
 
 	const workers = 256
 	var wg sync.WaitGroup
@@ -488,6 +493,14 @@ func tcpSweep(ctx context.Context, ips []string, ports []int) []openPort {
 				if err == nil {
 					conn.Close()
 					results <- openPort{j.ip, j.port}
+				}
+				if total > 0 {
+					n := done.Add(1)
+					prev := (n - 1) * 100 / total
+					curr := n * 100 / total
+					if curr/25 > prev/25 && curr < 100 {
+						logf("TCP sweep: %d%% complete", (curr/25)*25)
+					}
 				}
 			}
 		}()
@@ -607,7 +620,7 @@ type probeResult struct {
 //     239.255.255.250:3702
 //
 // Results are streamed over the returned channel as they arrive.
-func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string) <-chan *probeResult {
+func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string, withTCP bool) <-chan *probeResult {
 	ch := make(chan *probeResult, 64)
 
 	go func() {
@@ -629,92 +642,94 @@ func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string) <-chan *pr
 
 		var outerWg sync.WaitGroup
 
-		// ── Path 1: TCP sweep → HTTP probe ──────────────────────────────────
-		outerWg.Add(1)
-		go func() {
-			defer outerWg.Done()
+		// ── Path 1: TCP sweep → HTTP probe (manual full scan only) ──────────
+		if withTCP {
+			outerWg.Add(1)
+			go func() {
+				defer outerWg.Done()
 
-			// Parse CIDRs or fall back to auto-detect.
-			var nets []*net.IPNet
-			if len(cidrs) == 0 {
-				subnet, err := getLocalSubnet()
-				if err != nil {
-					d.logf("Failed to detect local subnet: %v", err)
-					return
-				}
-				nets = []*net.IPNet{subnet}
-			} else {
-				for _, cidr := range cidrs {
-					_, ipnet, err := net.ParseCIDR(cidr)
+				// Parse CIDRs or fall back to auto-detect.
+				var nets []*net.IPNet
+				if len(cidrs) == 0 {
+					subnet, err := getLocalSubnet()
 					if err != nil {
-						d.logf("Invalid subnet %q: %v", cidr, err)
-						continue
+						d.logf("Failed to detect local subnet: %v", err)
+						return
 					}
-					nets = append(nets, ipnet)
+					nets = []*net.IPNet{subnet}
+				} else {
+					for _, cidr := range cidrs {
+						_, ipnet, err := net.ParseCIDR(cidr)
+						if err != nil {
+							d.logf("Invalid subnet %q: %v", cidr, err)
+							continue
+						}
+						nets = append(nets, ipnet)
+					}
+					if len(nets) == 0 {
+						return
+					}
 				}
-				if len(nets) == 0 {
+
+				seen := make(map[string]bool)
+				var ips []string
+				for _, subnet := range nets {
+					hosts := generateIPs(subnet)
+					d.logf("Subnet %s: %d hosts", subnet, len(hosts))
+					for _, ip := range hosts {
+						if !seen[ip] {
+							seen[ip] = true
+							ips = append(ips, ip)
+						}
+					}
+				}
+
+				// ARP pre-sweep: quickly find live hosts before the full TCP sweep.
+				// On Linux with CAP_NET_RAW this can dramatically reduce scan time
+				// by skipping 750 ms timeouts for dead IPs.
+				if liveHosts := arpSweep(ctx, ips, time.Second); len(liveHosts) > 0 {
+					var alive []string
+					for _, ip := range ips {
+						if liveHosts[ip] {
+							alive = append(alive, ip)
+						}
+					}
+					d.logf("ARP sweep: %d/%d hosts alive", len(alive), len(ips))
+					ips = alive
+				}
+
+				d.logf("TCP sweep: %d hosts × %d ports", len(ips), len(scanPorts))
+				open := tcpSweep(ctx, ips, scanPorts, d.logf)
+				d.logf("TCP sweep complete: %d open ports found", len(open))
+
+				if len(open) == 0 || ctx.Err() != nil {
 					return
 				}
-			}
 
-			seen := make(map[string]bool)
-			var ips []string
-			for _, subnet := range nets {
-				hosts := generateIPs(subnet)
-				d.logf("Subnet %s: %d hosts", subnet, len(hosts))
-				for _, ip := range hosts {
-					if !seen[ip] {
-						seen[ip] = true
-						ips = append(ips, ip)
-					}
+				d.logf("HTTP probing %d open ports…", len(open))
+				jobs := make(chan openPort, len(open))
+				for _, op := range open {
+					jobs <- op
 				}
-			}
+				close(jobs)
 
-			// ARP pre-sweep: quickly find live hosts before the full TCP sweep.
-			// On Linux with CAP_NET_RAW this can dramatically reduce scan time
-			// by skipping 750 ms timeouts for dead IPs.
-			if liveHosts := arpSweep(ctx, ips, time.Second); len(liveHosts) > 0 {
-				var alive []string
-				for _, ip := range ips {
-					if liveHosts[ip] {
-						alive = append(alive, ip)
-					}
-				}
-				d.logf("ARP sweep: %d/%d hosts alive", len(alive), len(ips))
-				ips = alive
-			}
-
-			d.logf("TCP sweep: %d hosts × %d ports", len(ips), len(scanPorts))
-			open := tcpSweep(ctx, ips, scanPorts)
-			d.logf("TCP sweep complete: %d open ports found", len(open))
-
-			if len(open) == 0 || ctx.Err() != nil {
-				return
-			}
-
-			d.logf("HTTP probing %d open ports…", len(open))
-			jobs := make(chan openPort, len(open))
-			for _, op := range open {
-				jobs <- op
-			}
-			close(jobs)
-
-			const httpWorkers = 80
-			var wg sync.WaitGroup
-			for i := 0; i < httpWorkers; i++ {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for op := range jobs {
-						if ctx.Err() != nil {
-							return
+				const httpWorkers = 80
+				var wg sync.WaitGroup
+				for i := 0; i < httpWorkers; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						for op := range jobs {
+							if ctx.Err() != nil {
+								return
+							}
+							probeOnce(op)
 						}
-						probeOnce(op)
-					}
-				}()
-			}
-			wg.Wait()
-		}()
+					}()
+				}
+				wg.Wait()
+			}()
+		}
 
 		// ── Path 2: mDNS (DNS-SD) ────────────────────────────────────────────
 		outerWg.Add(1)
