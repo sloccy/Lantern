@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	dockertypes "github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	dockerclient "github.com/docker/docker/client"
@@ -48,7 +48,7 @@ func (d *Discoverer) DockerWatch(ctx context.Context) {
 
 	f := filters.NewArgs()
 	f.Add("type", "container")
-	msgCh, errCh := cli.Events(ctx, dockertypes.EventsOptions{Filters: f})
+	msgCh, errCh := cli.Events(ctx, events.ListOptions{Filters: f})
 
 	log.Println("discovery: watching Docker events")
 	for {
@@ -61,7 +61,7 @@ func (d *Discoverer) DockerWatch(ctx context.Context) {
 			}
 			log.Printf("discovery: Docker events error: %v — reconnecting in 10s", err)
 			time.Sleep(10 * time.Second)
-			msgCh, errCh = cli.Events(ctx, dockertypes.EventsOptions{Filters: f})
+			msgCh, errCh = cli.Events(ctx, events.ListOptions{Filters: f})
 		case msg := <-msgCh:
 			d.handleDockerEvent(ctx, cli, msg)
 		}
@@ -69,7 +69,7 @@ func (d *Discoverer) DockerWatch(ctx context.Context) {
 }
 
 func (d *Discoverer) syncContainers(ctx context.Context, cli *dockerclient.Client) {
-	containers, err := cli.ContainerList(ctx, dockertypes.ContainerListOptions{})
+	containers, err := cli.ContainerList(ctx, container.ListOptions{})
 	if err != nil {
 		log.Printf("discovery: list containers: %v", err)
 		return
@@ -87,7 +87,7 @@ func (d *Discoverer) handleDockerEvent(ctx context.Context, cli *dockerclient.Cl
 	switch msg.Action {
 	case "start":
 		time.Sleep(2 * time.Second) // brief delay for container to fully start
-		containers, err := cli.ContainerList(ctx, dockertypes.ContainerListOptions{})
+		containers, err := cli.ContainerList(ctx, container.ListOptions{})
 		if err != nil {
 			return
 		}
@@ -115,7 +115,7 @@ type containerInfo struct {
 
 // upsertContainerWithLabels resolves a container's configuration from Docker labels,
 // then creates or updates the service entry.
-func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name string, ports []dockertypes.Port, labels map[string]string) {
+func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name string, ports []container.Port, labels map[string]string) {
 	if name == "" || name == "atlas" {
 		return
 	}
@@ -170,7 +170,7 @@ func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name str
 //  1. atlas.* labels
 //  2. Traefik v2/v3 labels
 //  3. Published ports (bestPort heuristic)
-func (d *Discoverer) resolveContainer(name string, ports []dockertypes.Port, labels map[string]string) *containerInfo {
+func (d *Discoverer) resolveContainer(name string, ports []container.Port, labels map[string]string) *containerInfo {
 	info := &containerInfo{
 		name:      name,
 		subdomain: sanitiseSubdomain(name),
@@ -303,7 +303,7 @@ func traefikPort(labels map[string]string) int {
 // ── Port / target helpers ─────────────────────────────────────────────────────
 
 // bestPort picks the most useful published TCP port, preferring common web UI ports.
-func bestPort(ports []dockertypes.Port) int {
+func bestPort(ports []container.Port) int {
 	preferred := []uint16{80, 8080, 3000, 8000, 5000, 9000, 8096, 8123, 443, 8443}
 	portSet := make(map[uint16]bool)
 	for _, p := range ports {

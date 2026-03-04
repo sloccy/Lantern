@@ -57,7 +57,7 @@ LABEL org.opencontainers.image.title="Atlas" \
       org.opencontainers.image.licenses="MIT"
 
 # Ports: 80 (HTTP → HTTPS redirect), 443 (HTTPS proxy + GUI).
-# NET_BIND_SERVICE capability required when running as nonroot — see docker-compose.yml.
+# Privileged port binding is handled by the file capability set on the binary above (setcap).
 EXPOSE 80 443
 
 ENTRYPOINT ["/atlas"]
