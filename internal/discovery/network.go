@@ -526,7 +526,11 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 
 // ── Subnet helpers ────────────────────────────────────────────────────────────
 
-// getLocalSubnet returns the subnet of the first non-loopback IPv4 interface.
+// getLocalSubnet returns the subnet of the first suitable non-loopback IPv4
+// interface. Virtual interfaces created by Docker are skipped because they
+// carry wide masks (/16) that would cause the scanner to probe tens of
+// thousands of hosts. The result is capped at /24 as a safety net against
+// accidentally scanning large cloud or VPN subnets.
 func getLocalSubnet() (*net.IPNet, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -534,6 +538,11 @@ func getLocalSubnet() (*net.IPNet, error) {
 	}
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		// Skip Docker bridge and virtual ethernet interfaces.
+		n := iface.Name
+		if n == "docker0" || strings.HasPrefix(n, "br-") || strings.HasPrefix(n, "veth") {
 			continue
 		}
 		addrs, err := iface.Addrs()
@@ -551,7 +560,12 @@ func getLocalSubnet() (*net.IPNet, error) {
 			}
 			ones, bits := ipnet.Mask.Size()
 			if ones == 0 || bits != 32 {
-				continue // skip non-IPv4 or /0 masks
+				continue
+			}
+			// Cap at /24: don't scan more than 254 hosts when the interface
+			// has a wide mask (e.g. /8 or /16 on cloud or VPN networks).
+			if ones < 24 {
+				ones = 24
 			}
 			_, subnet, _ := net.ParseCIDR(fmt.Sprintf("%s/%d", ip4, ones))
 			return subnet, nil

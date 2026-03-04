@@ -27,6 +27,18 @@ var (
 )
 
 func main() {
+	// Healthcheck subcommand for container health probes.
+	// Distroless images have no shell or wget, so the binary handles its own check.
+	// Usage: /atlas healthcheck
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		resp, err := http.Get("http://127.0.0.1/healthz")
+		if err != nil || resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		resp.Body.Close()
+		os.Exit(0)
+	}
+
 	log.SetFlags(log.LstdFlags | log.Lmsgprefix)
 	log.SetPrefix("[atlas] ")
 
