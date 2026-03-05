@@ -91,7 +91,7 @@ func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub str
 			return nil
 		}
 		if locURL.Host == target.Host {
-			locURL.Scheme = scheme(r)
+			locURL.Scheme = "https"
 			locURL.Host = r.Host
 			resp.Header.Set("Location", locURL.String())
 		}
