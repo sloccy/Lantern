@@ -154,15 +154,30 @@ function renderStatus(s) {
     </div>`;
 
   const logEl = document.getElementById('scan-log');
-  if (s.scanning && s.scan_log && s.scan_log.length > 0) {
+  if (s.scan_log && s.scan_log.length > 0) {
+    clearTimeout(_logHideTimer);
     logEl.style.display = '';
-    logEl.innerHTML = s.scan_log.map(line => `<div class="scan-log-line">${esc(line)}</div>`).join('');
+    logEl.innerHTML = s.scan_log.map(line => `<div class="${_scanLogClass(line)}">${esc(line)}</div>`).join('');
     logEl.scrollTop = logEl.scrollHeight;
+    if (!s.scanning) {
+      _logHideTimer = setTimeout(() => { logEl.style.display = 'none'; }, 15000);
+    }
   } else if (!s.scanning) {
     logEl.style.display = 'none';
   }
 }
 
+function _scanLogClass(line) {
+  if (line.includes('[OPEN]'))  return 'scan-log-line open';
+  if (line.includes('[ERR]'))   return 'scan-log-line err';
+  if (line.includes('[TCP]'))   return 'scan-log-line tcp';
+  if (line.includes('[HTTP]'))  return 'scan-log-line http';
+  if (line.includes('[ARP]'))   return 'scan-log-line arp';
+  if (line.includes('[SCAN]'))  return 'scan-log-line scan';
+  return 'scan-log-line';
+}
+
+let _logHideTimer = null;
 let _scanPollTimer = null;
 
 async function triggerScan() {

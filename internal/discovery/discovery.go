@@ -35,8 +35,8 @@ func (d *Discoverer) logf(format string, args ...any) {
 	d.mu.Lock()
 	ts := time.Now().Format("15:04:05")
 	d.logLines = append(d.logLines, ts+" "+msg)
-	if len(d.logLines) > 200 {
-		d.logLines = d.logLines[len(d.logLines)-200:]
+	if len(d.logLines) > 2000 {
+		d.logLines = d.logLines[len(d.logLines)-2000:]
 	}
 	d.mu.Unlock()
 }

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -466,17 +467,37 @@ type openPort struct {
 
 // tcpSweep checks which (ip, port) pairs accept a TCP connection.
 // Uses 256 workers with a 750ms dial timeout — no data exchange.
-// logf is called at ~25 % progress intervals.
+// logf is called at 5% progress intervals with per-type error counts.
 func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, ...any)) []openPort {
 	type job struct {
 		ip   string
 		port int
 	}
+
+	// ── Pre-sweep debug summary ───────────────────────────────────────────────
+	start := time.Now()
+	portStrs := make([]string, len(ports))
+	for i, p := range ports {
+		portStrs[i] = strconv.Itoa(p)
+	}
+	logf("[TCP] Starting sweep: %d hosts × %d ports = %d combinations", len(ips), len(ports), len(ips)*len(ports))
+	logf("[TCP] Timeout: 750ms/conn, 256 concurrent workers")
+	logf("[TCP] Ports: %s", strings.Join(portStrs, ", "))
+	if len(ips) == 0 {
+		logf("[TCP] ERROR: no hosts to scan — check subnet config")
+		return nil
+	} else if len(ips) <= 30 {
+		logf("[TCP] Hosts: %s", strings.Join(ips, ", "))
+	} else {
+		logf("[TCP] Hosts: %s … %s (%d total)", ips[0], ips[len(ips)-1], len(ips))
+	}
+
 	jobs := make(chan job, 1024)
 	results := make(chan openPort, 256)
 
 	total := int64(len(ips) * len(ports))
 	var done atomic.Int64
+	var countOpen, countTimeouts, countRefused, countOther atomic.Int64
 
 	const workers = 256
 	var wg sync.WaitGroup
@@ -486,20 +507,36 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 			defer wg.Done()
 			for j := range jobs {
 				if ctx.Err() != nil {
+					logf("[TCP] Context cancelled — stopping workers")
 					return
 				}
 				addr := fmt.Sprintf("%s:%d", j.ip, j.port)
 				conn, err := net.DialTimeout("tcp", addr, 750*time.Millisecond)
 				if err == nil {
 					conn.Close()
+					countOpen.Add(1)
+					logf("[OPEN] %s:%d", j.ip, j.port)
 					results <- openPort{j.ip, j.port}
+				} else {
+					errStr := err.Error()
+					switch {
+					case strings.Contains(errStr, "i/o timeout") || strings.Contains(errStr, "timeout"):
+						countTimeouts.Add(1)
+					case strings.Contains(errStr, "connection refused"):
+						countRefused.Add(1)
+					default:
+						countOther.Add(1)
+						logf("[ERR] %s:%d → %v", j.ip, j.port, err)
+					}
 				}
 				if total > 0 {
 					n := done.Add(1)
 					prev := (n - 1) * 100 / total
 					curr := n * 100 / total
-					if curr/10 > prev/10 && curr < 100 {
-						logf("TCP sweep: %d%% complete (%d/%d)", (curr/10)*10, n, total)
+					if curr/5 > prev/5 && curr < 100 {
+						logf("[TCP] %d%% (%d/%d) — open:%d refused:%d timeout:%d other:%d",
+							(curr/5)*5, n, total,
+							countOpen.Load(), countRefused.Load(), countTimeouts.Load(), countOther.Load())
 					}
 				}
 			}
@@ -521,6 +558,11 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 	for op := range results {
 		open = append(open, op)
 	}
+
+	elapsed := time.Since(start).Round(time.Millisecond)
+	logf("[TCP] Done in %s: %d open, %d refused, %d timeout, %d other",
+		elapsed, countOpen.Load(), countRefused.Load(), countTimeouts.Load(), countOther.Load())
+
 	return open
 }
 
@@ -690,9 +732,11 @@ func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string, withTCP bo
 							d.logf("Invalid subnet %q: %v", cidr, err)
 							continue
 						}
+						d.logf("[SCAN] Parsed subnet: %s", ipnet.String())
 						nets = append(nets, ipnet)
 					}
 					if len(nets) == 0 {
+						d.logf("[SCAN] ERROR: no valid subnets to scan")
 						return
 					}
 				}
@@ -701,7 +745,10 @@ func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string, withTCP bo
 				var ips []string
 				for _, subnet := range nets {
 					hosts := generateIPs(subnet)
-					d.logf("Subnet %s: %d hosts", subnet, len(hosts))
+					d.logf("[SCAN] Subnet %s: %d hosts generated", subnet, len(hosts))
+					if len(hosts) <= 20 {
+						d.logf("[SCAN] IP list: %s", strings.Join(hosts, ", "))
+					}
 					for _, ip := range hosts {
 						if !seen[ip] {
 							seen[ip] = true
@@ -720,13 +767,18 @@ func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string, withTCP bo
 							alive = append(alive, ip)
 						}
 					}
-					d.logf("ARP sweep: %d/%d hosts alive", len(alive), len(ips))
+					d.logf("[ARP] %d/%d hosts alive: %s", len(alive), len(ips), strings.Join(alive, ", "))
 					ips = alive
+				} else {
+					d.logf("[ARP] No live hosts via ARP (unavailable or all dead) — scanning all %d IPs", len(ips))
 				}
 
-				d.logf("TCP sweep: %d hosts × %d ports", len(ips), len(scanPorts))
+				d.logf("[TCP] Handing off to tcpSweep: %d hosts × %d ports", len(ips), len(scanPorts))
 				open := tcpSweep(ctx, ips, scanPorts, d.logf)
-				d.logf("TCP sweep complete: %d open ports found", len(open))
+				d.logf("[TCP] tcpSweep returned: %d open ports total", len(open))
+				for _, op := range open {
+					d.logf("[TCP]   → %s:%d", op.ip, op.port)
+				}
 
 				if len(open) == 0 || ctx.Err() != nil {
 					return
@@ -749,6 +801,11 @@ func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string, withTCP bo
 							if ctx.Err() != nil {
 								return
 							}
+							scheme := "http"
+							if httpsPorts[op.port] {
+								scheme = "https"
+							}
+							d.logf("[HTTP] Probing %s://%s:%d/", scheme, op.ip, op.port)
 							probeOnce(op)
 						}
 					}()
