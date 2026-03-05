@@ -62,4 +62,10 @@ LABEL org.opencontainers.image.title="Atlas" \
 # Privileged port binding is handled by the file capability set on the binary above (setcap).
 EXPOSE 80 443
 
+# Health check: distroless has no shell, so the binary handles its own probe.
+# JSON exec form avoids any /bin/sh dependency. docker-compose.yml must NOT
+# override this with a YAML healthcheck block or it will reintroduce the issue.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/atlas", "healthcheck"]
+
 ENTRYPOINT ["/atlas"]
