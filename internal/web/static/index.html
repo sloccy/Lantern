@@ -72,10 +72,23 @@
     <section class="section">
       <div class="section-header">
         <h2 class="section-title">Discovered</h2>
-        <span id="discovered-count" class="count-badge"></span>
+        <div style="display:flex;gap:.5rem;align-items:center">
+          <span id="discovered-count" class="count-badge"></span>
+          <button class="btn btn-ghost btn-sm" onclick="toggleIgnored()">Ignored</button>
+        </div>
       </div>
       <p class="section-desc">Services found by network scan or Docker that haven't been assigned a subdomain.</p>
       <div id="discovered-list"></div>
+    </section>
+
+    <!-- Ignored -->
+    <section class="section" id="ignored-section" style="display:none">
+      <div class="section-header">
+        <h2 class="section-title">Ignored Services</h2>
+        <button class="btn btn-ghost btn-sm" onclick="toggleIgnored()">✕ Close</button>
+      </div>
+      <p class="section-desc">These IP:port pairs are permanently suppressed from discovery results. Un-ignore to allow them to reappear.</p>
+      <div id="ignored-list"></div>
     </section>
 
     <!-- Dynamic DNS -->

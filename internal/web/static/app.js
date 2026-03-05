@@ -60,10 +60,9 @@ async function loadHome() {
       return;
     }
     empty.style.display = 'none';
-    grid.innerHTML = services
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map(svc => renderCard(svc, status.domain))
-      .join('');
+    const sorted = services.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
+    grid.innerHTML = sorted.map(svc => renderCard(svc, status.domain)).join('');
+    _initDrag(grid, sorted);
   } catch (e) {
     grid.innerHTML = `<p style="color:var(--danger);padding:2rem">${e.message}</p>`;
   }
@@ -79,7 +78,7 @@ function renderCard(svc, domain) {
     icon = `<img class="card-icon" src="${faviconSrc}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="card-icon-placeholder" style="display:none">${svcEmoji(svc)}</div>`;
   }
   return `
-    <a class="service-card" href="${esc(url)}" target="_blank" rel="noopener">
+    <a class="service-card" href="${esc(url)}" target="_blank" rel="noopener" draggable="true" data-id="${esc(svc.id)}">
       ${icon}
       <div class="card-name">${esc(svc.name)}</div>
       <div class="card-url">${esc(svc.subdomain)}.${esc(domain)}</div>
@@ -99,10 +98,59 @@ function svcEmoji(svc) {
   return '🖥️';
 }
 
+// ── Drag-to-reorder ──────────────────────────────────────────────────────────
+
+let _dragSrc = null;
+
+function _initDrag(grid, sorted) {
+  grid.querySelectorAll('.service-card').forEach(card => {
+    card.addEventListener('dragstart', e => {
+      _dragSrc = card;
+      card.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    card.addEventListener('dragend', () => {
+      _dragSrc = null;
+      grid.querySelectorAll('.service-card').forEach(c => c.classList.remove('dragging', 'drag-over'));
+    });
+    card.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      if (card !== _dragSrc) {
+        grid.querySelectorAll('.service-card').forEach(c => c.classList.remove('drag-over'));
+        card.classList.add('drag-over');
+      }
+    });
+    card.addEventListener('drop', e => {
+      e.preventDefault();
+      if (!_dragSrc || _dragSrc === card) return;
+      const cards = [...grid.querySelectorAll('.service-card')];
+      const srcIdx = cards.indexOf(_dragSrc);
+      const dstIdx = cards.indexOf(card);
+      if (srcIdx < dstIdx) {
+        card.after(_dragSrc);
+      } else {
+        card.before(_dragSrc);
+      }
+      card.classList.remove('drag-over');
+      _saveOrder(grid);
+    });
+  });
+}
+
+async function _saveOrder(grid) {
+  const ids = [...grid.querySelectorAll('.service-card')].map(c => c.dataset.id);
+  try {
+    await api('POST', '/api/services/reorder', { ids });
+  } catch (e) {
+    toast('Failed to save order', 'error');
+  }
+}
+
 // ── Manage view ───────────────────────────────────────────────────────────────
 
 async function loadManage() {
-  await Promise.all([loadStatus(), loadScanSubnets(), loadServices(), loadDiscovered(), loadDDNS()]);
+  await Promise.all([loadStatus(), loadScanSubnets(), loadServices(), loadDiscovered(), loadDDNS(), loadIgnored()]);
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -286,7 +334,7 @@ async function loadServices() {
     }
     const domain = statusData.domain || '';
     const rows = services
-      .sort((a, b) => a.name.localeCompare(b.name))
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name))
       .map(svc => serviceRow(svc, domain))
       .join('');
     el.innerHTML = `
@@ -382,6 +430,7 @@ function discItem(d) {
       </div>
       <div class="disc-actions">
         <button class="btn btn-primary btn-sm" onclick="showAssignModal('${esc(d.id)}','${esc(label)}')">Assign</button>
+        <button class="btn btn-ghost btn-sm" onclick="ignoreDiscovered('${esc(d.id)}')">Ignore</button>
         <button class="btn btn-ghost btn-sm" onclick="dismissDiscovered('${esc(d.id)}')">✕</button>
       </div>
     </div>`;
@@ -391,6 +440,62 @@ async function dismissDiscovered(id) {
   try {
     await api('DELETE', `/api/discovered/${id}`);
     loadDiscovered();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function ignoreDiscovered(id) {
+  try {
+    await api('POST', `/api/discovered/${id}/ignore`);
+    toast('Service ignored — will not reappear in scans');
+    loadDiscovered();
+    loadIgnored();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+// ── Ignored ───────────────────────────────────────────────────────────────────
+
+let _ignoredVisible = false;
+
+function toggleIgnored() {
+  _ignoredVisible = !_ignoredVisible;
+  document.getElementById('ignored-section').style.display = _ignoredVisible ? '' : 'none';
+  if (_ignoredVisible) loadIgnored();
+}
+
+async function loadIgnored() {
+  const el = document.getElementById('ignored-list');
+  if (!el) return;
+  try {
+    const items = await api('GET', '/api/ignored');
+    if (!items || items.length === 0) {
+      el.innerHTML = '<div class="empty-small">No ignored services.</div>';
+      return;
+    }
+    el.innerHTML = items.map(ig => `
+      <div class="disc-item">
+        <span class="svc-icon-placeholder">🚫</span>
+        <div class="disc-info">
+          <div class="disc-title">${esc(ig.ip)}:${ig.port}${ig.title ? ' — ' + esc(ig.title) : ''}</div>
+          <div class="disc-meta" style="font-size:.8rem;color:var(--muted)">Ignored ${relativeTime(new Date(ig.ignored_at))}</div>
+        </div>
+        <div class="disc-actions">
+          <button class="btn btn-ghost btn-sm" onclick="unignoreService('${esc(ig.id)}')">Un-ignore</button>
+        </div>
+      </div>`).join('');
+  } catch (e) {
+    el.innerHTML = `<p style="color:var(--danger);padding:1rem">${e.message}</p>`;
+  }
+}
+
+async function unignoreService(id) {
+  try {
+    await api('DELETE', `/api/ignored/${id}`);
+    toast('Service un-ignored — will reappear in future scans');
+    loadIgnored();
   } catch (e) {
     toast(e.message, 'error');
   }
@@ -571,9 +676,10 @@ async function showEditModal(id) {
         <div id="m-icon-preview">${iconPreview}</div>
         <label class="btn btn-ghost btn-sm" for="m-icon-file" style="cursor:pointer">Upload</label>
         <input id="m-icon-file" type="file" accept="image/*" style="display:none" onchange="_previewIconFile(this)">
+        <button class="btn btn-ghost btn-sm" id="m-pull-favicon-btn" onclick="_pullFavicon('${esc(id)}')">Pull Favicon</button>
         ${removeBtn}
       </div>
-      <div class="input-hint">Upload a custom icon, or leave empty to use the service favicon.</div>
+      <div class="input-hint">Upload a custom icon, pull from the service, or leave empty to use the live favicon proxy.</div>
     </div>
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
@@ -584,6 +690,23 @@ async function showEditModal(id) {
     const val = sanitiseSubdomain(e.target.value) || e.target.value;
     document.getElementById('sub-preview').textContent = `${val}.${statusData.domain || ''}`;
   });
+}
+
+async function _pullFavicon(id) {
+  const btn = document.getElementById('m-pull-favicon-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ Fetching…'; }
+  try {
+    const svc = await api('POST', `/api/services/${id}/favicon`);
+    document.getElementById('m-icon-preview').innerHTML =
+      `<img src="${esc(svc.icon)}" alt="" style="width:40px;height:40px;border-radius:6px;object-fit:contain">`;
+    const fileInput = document.getElementById('m-icon-file');
+    if (fileInput) { fileInput.value = ''; fileInput.dataset.pendingClear = ''; }
+    toast('Favicon pulled');
+  } catch (e) {
+    toast(e.message || 'No favicon found', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Pull Favicon'; }
+  }
 }
 
 function _previewIconFile(input) {

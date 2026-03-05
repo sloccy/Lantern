@@ -170,6 +170,15 @@ func (d *Discoverer) runScan(ctx context.Context) {
 	}
 	d.logf("Skipping %d already-assigned service targets", len(assignedTargets)/2)
 
+	// Build ignored set: ip:port pairs the user has permanently suppressed.
+	ignoredSet := make(map[string]bool)
+	for _, ig := range d.store.GetIgnored() {
+		ignoredSet[fmt.Sprintf("%s:%d", ig.IP, ig.Port)] = true
+	}
+	if len(ignoredSet) > 0 {
+		d.logf("Skipping %d ignored ip:port pairs", len(ignoredSet))
+	}
+
 	// Clear old network entries so partial results are visible as they arrive.
 	d.store.ClearNetworkDiscovered()
 
@@ -177,6 +186,10 @@ func (d *Discoverer) runScan(ctx context.Context) {
 
 	count := 0
 	for r := range ch {
+		// Skip IPs/ports the user has ignored.
+		if ignoredSet[fmt.Sprintf("%s:%d", r.ip, r.port)] {
+			continue
+		}
 		// Skip IPs/ports already assigned as services.
 		if assignedTargets[r.url] ||
 			assignedTargets[fmt.Sprintf("http://%s:%d", r.ip, r.port)] ||

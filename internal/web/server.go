@@ -20,6 +20,7 @@ import (
 
 	"atlas/internal/cf"
 	"atlas/internal/config"
+	"atlas/internal/discovery"
 	"atlas/internal/store"
 )
 
@@ -90,8 +91,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /api/ddns/{domain}", s.removeDDNS)
 
 	s.mux.HandleFunc("GET /api/favicon", s.getFavicon)
+	s.mux.HandleFunc("POST /api/services/reorder", s.reorderServices)
 	s.mux.HandleFunc("POST /api/services/{id}/icon", s.uploadServiceIcon)
+	s.mux.HandleFunc("POST /api/services/{id}/favicon", s.pullServiceFavicon)
 	s.mux.HandleFunc("DELETE /api/services/{id}/icon", s.clearServiceIcon)
+
+	s.mux.HandleFunc("POST /api/discovered/{id}/ignore", s.ignoreDiscovered)
+	s.mux.HandleFunc("GET /api/ignored", s.listIgnored)
+	s.mux.HandleFunc("DELETE /api/ignored/{id}", s.unignoreService)
 }
 
 // ---- Helpers ----------------------------------------------------------------
@@ -198,6 +205,25 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Save(); err != nil {
 		log.Printf("web: save: %v", err)
 	}
+
+	// Asynchronously fetch favicon if the service has no icon yet.
+	if svc.Icon == "" {
+		go func(id, target string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			icon := discovery.FetchFaviconForTarget(ctx, target)
+			if icon == "" {
+				return
+			}
+			if existing := s.store.GetServiceByID(id); existing != nil {
+				updated := *existing
+				updated.Icon = icon
+				s.store.UpdateService(id, &updated)
+				_ = s.store.Save()
+			}
+		}(svc.ID, svc.Target)
+	}
+
 	writeJSON(w, http.StatusCreated, svc)
 }
 
@@ -520,6 +546,82 @@ func (s *Server) clearServiceIcon(w http.ResponseWriter, r *http.Request) {
 		log.Printf("web: save: %v", err)
 	}
 	writeJSON(w, http.StatusOK, &updated)
+}
+
+// ---- Service reorder --------------------------------------------------------
+
+func (s *Server) reorderServices(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if err := readJSON(r, &req); err != nil || len(req.IDs) == 0 {
+		apiError(w, http.StatusBadRequest, "ids array is required")
+		return
+	}
+	s.store.ReorderServices(req.IDs)
+	if err := s.store.Save(); err != nil {
+		log.Printf("web: save: %v", err)
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// ---- Favicon pull -----------------------------------------------------------
+
+func (s *Server) pullServiceFavicon(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	svc := s.store.GetServiceByID(id)
+	if svc == nil {
+		apiError(w, http.StatusNotFound, "service not found")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	icon := discovery.FetchFaviconForTarget(ctx, svc.Target)
+	if icon == "" {
+		apiError(w, http.StatusUnprocessableEntity, "no favicon found")
+		return
+	}
+	updated := *svc
+	updated.Icon = icon
+	s.store.UpdateService(id, &updated)
+	if err := s.store.Save(); err != nil {
+		log.Printf("web: save: %v", err)
+	}
+	writeJSON(w, http.StatusOK, &updated)
+}
+
+// ---- Ignore discovered ------------------------------------------------------
+
+func (s *Server) ignoreDiscovered(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.store.IgnoreDiscovered(id); err != nil {
+		apiError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := s.store.Save(); err != nil {
+		log.Printf("web: save: %v", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) listIgnored(w http.ResponseWriter, r *http.Request) {
+	ignored := s.store.GetIgnored()
+	if ignored == nil {
+		ignored = []*store.IgnoredService{}
+	}
+	writeJSON(w, http.StatusOK, ignored)
+}
+
+func (s *Server) unignoreService(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.store.UnignoreService(id); err != nil {
+		apiError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := s.store.Save(); err != nil {
+		log.Printf("web: save: %v", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- Utilities --------------------------------------------------------------

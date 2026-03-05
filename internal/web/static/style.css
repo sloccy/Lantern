@@ -106,6 +106,14 @@ a:hover { text-decoration: underline; }
   align-items: center;
   gap: .6rem;
 }
+.service-card.dragging {
+  opacity: .4;
+  cursor: grabbing;
+}
+.service-card.drag-over {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent);
+}
 .service-card:hover {
   border-color: var(--accent);
   transform: translateY(-3px);

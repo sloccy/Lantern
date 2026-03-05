@@ -16,10 +16,20 @@ type Service struct {
 	Subdomain   string    `json:"subdomain"`
 	Target      string    `json:"target"` // e.g. http://10.0.0.5:8080
 	Icon        string    `json:"icon,omitempty"`
+	Order       int       `json:"order,omitempty"`
 	Source      string    `json:"source"` // "docker" | "network" | "manual"
 	ContainerID string    `json:"container_id,omitempty"`
 	DNSRecordID string    `json:"dns_record_id,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
+}
+
+// IgnoredService is a discovered service the user has chosen to suppress.
+type IgnoredService struct {
+	ID        string    `json:"id"`
+	IP        string    `json:"ip"`
+	Port      int       `json:"port"`
+	Title     string    `json:"title,omitempty"`
+	IgnoredAt time.Time `json:"ignored_at"`
 }
 
 // DiscoveredService is a network/docker service not yet assigned a subdomain.
@@ -40,6 +50,7 @@ type DiscoveredService struct {
 type data struct {
 	Services     map[string]*Service   `json:"services"`
 	Discovered   []*DiscoveredService  `json:"discovered"`
+	Ignored      []*IgnoredService     `json:"ignored"`
 	DDNSDomains  []string              `json:"ddns_domains"`
 	ScanSubnets  []string              `json:"scan_subnets"`
 	LastScan     time.Time             `json:"last_scan"`
@@ -62,6 +73,7 @@ func New(dataDir string) (*Store, error) {
 		d: data{
 			Services:    make(map[string]*Service),
 			Discovered:  []*DiscoveredService{},
+			Ignored:     []*IgnoredService{},
 			DDNSDomains: []string{},
 			ScanSubnets: []string{},
 		},
@@ -169,6 +181,22 @@ func (s *Store) DeleteService(id string) (sub, dnsID string) {
 		}
 	}
 	return
+}
+
+// ReorderServices sets the Order field on each service based on the provided
+// slice of IDs (index 0 = first). Services not in the list keep their
+// current Order value.
+func (s *Store) ReorderServices(ids []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, id := range ids {
+		for _, svc := range s.d.Services {
+			if svc.ID == id {
+				svc.Order = i
+				break
+			}
+		}
+	}
 }
 
 // ---- Discovered -------------------------------------------------------------
@@ -289,6 +317,75 @@ func (s *Store) UpsertNetworkDiscovered(svc *DiscoveredService) {
 		}
 	}
 	s.d.Discovered = append(s.d.Discovered, svc)
+}
+
+// ---- Ignored ----------------------------------------------------------------
+
+// IgnoreDiscovered moves a discovered entry into the ignored list.
+func (s *Store) IgnoreDiscovered(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found *DiscoveredService
+	filtered := s.d.Discovered[:0]
+	for _, d := range s.d.Discovered {
+		if d.ID == id {
+			found = d
+		} else {
+			filtered = append(filtered, d)
+		}
+	}
+	if found == nil {
+		return fmt.Errorf("discovered service %q not found", id)
+	}
+	s.d.Discovered = filtered
+	s.d.Ignored = append(s.d.Ignored, &IgnoredService{
+		ID:        found.ID,
+		IP:        found.IP,
+		Port:      found.Port,
+		Title:     found.Title,
+		IgnoredAt: time.Now(),
+	})
+	return nil
+}
+
+func (s *Store) GetIgnored() []*IgnoredService {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*IgnoredService, len(s.d.Ignored))
+	copy(out, s.d.Ignored)
+	return out
+}
+
+// UnignoreService removes an entry from the ignored list by ID.
+func (s *Store) UnignoreService(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	filtered := s.d.Ignored[:0]
+	found := false
+	for _, ig := range s.d.Ignored {
+		if ig.ID == id {
+			found = true
+		} else {
+			filtered = append(filtered, ig)
+		}
+	}
+	if !found {
+		return fmt.Errorf("ignored service %q not found", id)
+	}
+	s.d.Ignored = filtered
+	return nil
+}
+
+// IsIgnored reports whether the given IP:port pair is in the ignored list.
+func (s *Store) IsIgnored(ip string, port int) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, ig := range s.d.Ignored {
+		if ig.IP == ip && ig.Port == port {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- DDNS -------------------------------------------------------------------

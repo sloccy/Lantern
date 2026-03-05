@@ -18,58 +18,6 @@ import (
 )
 
 var (
-	// scanPorts covers common homelab service web UIs.
-	scanPorts = []int{
-		80,    // HTTP
-		443,   // HTTPS
-		1880,  // Node-RED
-		2283,  // Immich
-		2342,  // PhotoPrism
-		3000,  // Grafana, Gitea, various
-		3001,  // various
-		4533,  // Navidrome
-		5000,  // various (Changedetection.io, Kavita)
-		5001,  // Synology DSM HTTPS, various
-		5055,  // Overseerr
-		5380,  // Technitium DNS
-		5800,  // noVNC / VNC web
-		6767,  // Bazarr
-		6080,  // noVNC
-		7575,  // Homarr
-		7878,  // Radarr
-		8001,  // various
-		8006,  // Proxmox VE
-		8008,  // Matrix Synapse HTTP
-		8080,  // Traefik dashboard, various
-		8083,  // Calibre-Web / Emby
-		8096,  // Jellyfin
-		8112,  // Deluge Web UI
-		8123,  // Home Assistant
-		8181,  // Tautulli
-		8200,  // HashiCorp Vault
-		8384,  // Syncthing
-		8443,  // HTTPS alternative
-		8448,  // Matrix Synapse HTTPS / federation
-		8484,  // Dasherr / Homer
-		8686,  // Lidarr
-		8787,  // Readarr
-		8888,  // Jupyter Notebook
-		8920,  // Jellyfin HTTPS
-		8989,  // Sonarr
-		9000,  // Portainer, MinIO API, various
-		9001,  // MinIO Console
-		9090,  // Prometheus
-		9091,  // Transmission
-		9117,  // Jackett
-		9443,  // Portainer HTTPS
-		9696,  // Prowlarr
-		9714,  // Scrutiny
-		10000, // Webmin
-		13378, // Audiobookshelf
-		19999, // Netdata
-		32400, // Plex
-	}
-
 	// httpsPorts are probed with HTTPS instead of HTTP.
 	httpsPorts = map[int]bool{443: true, 5001: true, 8006: true, 8443: true, 8448: true, 8920: true, 9443: true}
 
@@ -481,7 +429,7 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 		portStrs[i] = strconv.Itoa(p)
 	}
 	logf("[TCP] Starting sweep: %d hosts × %d ports = %d combinations", len(ips), len(ports), len(ips)*len(ports))
-	logf("[TCP] Timeout: 750ms/conn, 256 concurrent workers")
+	logf("[TCP] Timeout: 200ms/conn, 4096 concurrent workers")
 	logf("[TCP] Ports: %s", strings.Join(portStrs, ", "))
 	if len(ips) == 0 {
 		logf("[TCP] ERROR: no hosts to scan — check subnet config")
@@ -499,7 +447,7 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 	var done atomic.Int64
 	var countOpen, countTimeouts, countRefused, countOther atomic.Int64
 
-	const workers = 256
+	const workers = 4096
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -511,7 +459,7 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 					return
 				}
 				addr := fmt.Sprintf("%s:%d", j.ip, j.port)
-				conn, err := net.DialTimeout("tcp", addr, 750*time.Millisecond)
+				conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 				if err == nil {
 					conn.Close()
 					countOpen.Add(1)
@@ -773,8 +721,12 @@ func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string, withTCP bo
 					d.logf("[ARP] No live hosts via ARP (unavailable or all dead) — scanning all %d IPs", len(ips))
 				}
 
-				d.logf("[TCP] Handing off to tcpSweep: %d hosts × %d ports", len(ips), len(scanPorts))
-				open := tcpSweep(ctx, ips, scanPorts, d.logf)
+				allPorts := make([]int, 65535)
+				for i := range allPorts {
+					allPorts[i] = i + 1
+				}
+				d.logf("[TCP] Handing off to tcpSweep: %d hosts × %d ports", len(ips), len(allPorts))
+				open := tcpSweep(ctx, ips, allPorts, d.logf)
 				d.logf("[TCP] tcpSweep returned: %d open ports total", len(open))
 				for _, op := range open {
 					d.logf("[TCP]   → %s:%d", op.ip, op.port)
@@ -951,6 +903,27 @@ func resolveRef(ref, base string) string {
 		return ref
 	}
 	return bu.ResolveReference(rel).String()
+}
+
+// FetchFaviconForTarget fetches the page at targetURL, extracts the favicon
+// link, fetches the favicon, and returns a base64 data URI.
+// Returns empty string if no favicon is found or fetch fails.
+func FetchFaviconForTarget(ctx context.Context, targetURL string) string {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return ""
+	}
+	faviconURL := extractFaviconURL(string(body), targetURL)
+	return fetchFaviconBase64(ctx, faviconURL)
 }
 
 func fetchFaviconBase64(ctx context.Context, faviconURL string) string {
