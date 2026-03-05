@@ -364,7 +364,3 @@ func sanitiseSubdomain(name string) string {
 	}
 	return s
 }
-
-func itoa(i int) string {
-	return fmt.Sprintf("%d", i)
-}

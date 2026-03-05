@@ -105,7 +105,16 @@ a:hover { text-decoration: underline; }
   flex-direction: column;
   align-items: center;
   gap: .6rem;
+  position: relative;
 }
+.health-dot {
+  position: absolute;
+  top: 8px; right: 8px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+}
+.health-dot.up   { background: #22c55e; }
+.health-dot.down { background: #ef4444; }
 .service-card.dragging {
   opacity: .4;
   cursor: grabbing;

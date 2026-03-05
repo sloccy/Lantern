@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"lantern/internal/cf"
@@ -34,6 +35,15 @@ var faviconClient = &http.Client{
 	},
 }
 
+// healthClient is used for background service health checks.
+var healthClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		DisableKeepAlives: true,
+	},
+}
+
 //go:embed static
 var staticFiles embed.FS
 
@@ -46,11 +56,13 @@ type Scanner interface {
 
 // Server serves the web GUI and REST API.
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	cf      *cf.Client
-	scanner Scanner
-	mux     *http.ServeMux
+	cfg      *config.Config
+	store    *store.Store
+	cf       *cf.Client
+	scanner  Scanner
+	mux      *http.ServeMux
+	healthMu sync.RWMutex
+	health   map[string]string // service ID → "up" | "down"
 }
 
 func New(cfg *config.Config, st *store.Store, cfClient *cf.Client) *Server {
@@ -101,6 +113,66 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/discovered/{id}/ignore", s.ignoreDiscovered)
 	s.mux.HandleFunc("GET /api/ignored", s.listIgnored)
 	s.mux.HandleFunc("DELETE /api/ignored/{id}", s.unignoreService)
+
+	s.mux.HandleFunc("GET /api/health", s.getHealth)
+}
+
+// ---- Health checker ---------------------------------------------------------
+
+// StartHealthChecker polls all assigned services every 30 seconds and records
+// whether each is reachable. Any HTTP response (including 3xx/4xx/5xx) counts
+// as "up" — only a connection failure counts as "down".
+func (s *Server) StartHealthChecker(ctx context.Context) {
+	s.checkHealth()
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			s.checkHealth()
+		}
+	}
+}
+
+func (s *Server) checkHealth() {
+	services := s.store.GetAllServices()
+	result := make(map[string]string, len(services))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, svc := range services {
+		wg.Add(1)
+		go func(id, target string) {
+			defer wg.Done()
+			status := "down"
+			req, err := http.NewRequest(http.MethodGet, target, nil)
+			if err == nil {
+				resp, err := healthClient.Do(req)
+				if err == nil {
+					resp.Body.Close()
+					status = "up"
+				}
+			}
+			mu.Lock()
+			result[id] = status
+			mu.Unlock()
+		}(svc.ID, svc.Target)
+	}
+	wg.Wait()
+	s.healthMu.Lock()
+	s.health = result
+	s.healthMu.Unlock()
+}
+
+func (s *Server) getHealth(w http.ResponseWriter, r *http.Request) {
+	s.healthMu.RLock()
+	out := make(map[string]string, len(s.health))
+	for k, v := range s.health {
+		out[k] = v
+	}
+	s.healthMu.RUnlock()
+	writeJSON(w, http.StatusOK, out)
 }
 
 // ---- Helpers ----------------------------------------------------------------

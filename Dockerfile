@@ -51,7 +51,7 @@ COPY --from=builder --chown=65532:65532 /data /data
 # OCI image labels (populated by docker/metadata-action in CI).
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=unknown
-LABEL org.opencontainers.image.title="Atlas" \
+LABEL org.opencontainers.image.title="Lantern" \
       org.opencontainers.image.description="Homelab reverse proxy, service discovery & homepage" \
       org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.revision="${BUILD_COMMIT}" \

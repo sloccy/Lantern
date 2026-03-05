@@ -416,7 +416,7 @@ type openPort struct {
 // tcpSweep checks which (ip, port) pairs accept a TCP connection.
 // Uses 256 workers with a 750ms dial timeout — no data exchange.
 // logf is called at 5% progress intervals with per-type error counts.
-func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, ...any)) []openPort {
+func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, ...any), timeout time.Duration) []openPort {
 	type job struct {
 		ip   string
 		port int
@@ -429,7 +429,7 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 		portStrs[i] = strconv.Itoa(p)
 	}
 	logf("[TCP] Starting sweep: %d hosts × %d ports = %d combinations", len(ips), len(ports), len(ips)*len(ports))
-	logf("[TCP] Timeout: 200ms/conn, 4096 concurrent workers")
+	logf("[TCP] Timeout: %v/conn, 4096 concurrent workers", timeout)
 	logf("[TCP] Ports: %s", strings.Join(portStrs, ", "))
 	if len(ips) == 0 {
 		logf("[TCP] ERROR: no hosts to scan — check subnet config")
@@ -459,7 +459,7 @@ func tcpSweep(ctx context.Context, ips []string, ports []int, logf func(string, 
 					return
 				}
 				addr := fmt.Sprintf("%s:%d", j.ip, j.port)
-				conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+				conn, err := net.DialTimeout("tcp", addr, timeout)
 				if err == nil {
 					conn.Close()
 					countOpen.Add(1)
@@ -726,7 +726,7 @@ func (d *Discoverer) scanNetwork(ctx context.Context, cidrs []string, withTCP bo
 					allPorts[i] = i + 1
 				}
 				d.logf("[TCP] Handing off to tcpSweep: %d hosts × %d ports", len(ips), len(allPorts))
-				open := tcpSweep(ctx, ips, allPorts, d.logf)
+				open := tcpSweep(ctx, ips, allPorts, d.logf, d.cfg.ScanTimeout)
 				d.logf("[TCP] tcpSweep returned: %d open ports total", len(open))
 				for _, op := range open {
 					d.logf("[TCP]   → %s:%d", op.ip, op.port)

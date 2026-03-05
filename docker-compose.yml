@@ -53,6 +53,10 @@ services:
       # Examples: 24h, 12h, 6h, 30m
       SCAN_INTERVAL: "24h"
 
+      # TCP dial timeout per port during network scans, in milliseconds.
+      # Increase if scanning slow links or VLANs. Default: 200
+      # SCAN_TIMEOUT_MS: "200"
+
 
 volumes:
   lantern_data:

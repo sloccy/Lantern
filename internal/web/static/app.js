@@ -50,8 +50,11 @@ async function loadHome() {
   const grid  = document.getElementById('services-grid');
   const empty = document.getElementById('home-empty');
   try {
-    const services = await api('GET', '/api/services');
-    const status   = await api('GET', '/api/status');
+    const [services, status, health] = await Promise.all([
+      api('GET', '/api/services'),
+      api('GET', '/api/status'),
+      api('GET', '/api/health').catch(() => ({})),
+    ]);
     statusData = status;
 
     if (!services || services.length === 0) {
@@ -61,14 +64,14 @@ async function loadHome() {
     }
     empty.style.display = 'none';
     const sorted = services.sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
-    grid.innerHTML = sorted.map(svc => renderCard(svc, status.domain)).join('');
+    grid.innerHTML = sorted.map(svc => renderCard(svc, status.domain, health)).join('');
     _initDrag(grid, sorted);
   } catch (e) {
     grid.innerHTML = `<p style="color:var(--danger);padding:2rem">${e.message}</p>`;
   }
 }
 
-function renderCard(svc, domain) {
+function renderCard(svc, domain, health) {
   const url  = `https://${svc.subdomain}.${domain}`;
   let icon;
   if (svc.icon) {
@@ -77,8 +80,10 @@ function renderCard(svc, domain) {
     const faviconSrc = `/api/favicon?url=${encodeURIComponent(svc.target)}`;
     icon = `<img class="card-icon" src="${faviconSrc}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="card-icon-placeholder" style="display:none">${svcEmoji(svc)}</div>`;
   }
+  const dot = health?.[svc.id] || '';
   return `
     <a class="service-card" href="${esc(url)}" target="_blank" rel="noopener" draggable="true" data-id="${esc(svc.id)}">
+      <span class="health-dot ${dot}" title="${dot}"></span>
       ${icon}
       <div class="card-name">${esc(svc.name)}</div>
       <div class="card-url">${esc(svc.subdomain)}.${esc(domain)}</div>

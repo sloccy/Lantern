@@ -48,6 +48,9 @@ func main() {
 	}
 	log.Printf("starting version=%s commit=%s domain=%s server_ip=%s scan_interval=%s",
 		version, commit, cfg.Domain, cfg.ServerIP, cfg.ScanInterval)
+	if cfg.Domain == "" {
+		log.Println("WARNING: DOMAIN not set — TLS cert provisioning and DNS management will not work")
+	}
 
 	// Persistent store.
 	st, err := store.New(cfg.DataDir)
@@ -89,6 +92,7 @@ func main() {
 
 	go disco.DockerWatch(ctx)
 	go disco.ScheduledScan(ctx)
+	go webSrv.StartHealthChecker(ctx)
 
 	// Dynamic DNS.
 	ddnsMgr := ddns.New(cfg, st, cfClient)
