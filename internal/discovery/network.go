@@ -825,6 +825,11 @@ func probeHTTP(ctx context.Context, ip string, port int) *probeResult {
 	}
 	defer resp.Body.Close()
 
+	// Skip responses that indicate no real service at this address.
+	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
 		return nil
@@ -844,11 +849,10 @@ func probeHTTP(ctx context.Context, ip string, port int) *probeResult {
 	// Stage 3: Fingerprint using headers + body + title.
 	svcName, confidence, svcIcon := fingerprint(resp.Header, bodyStr, title)
 
-	// Use fingerprint emoji icon if matched; otherwise fetch the favicon.
-	icon := svcIcon
+	// Always try to fetch a real favicon; use fingerprint emoji only as fallback.
+	icon := fetchFaviconBase64(ctx, extractFaviconURL(bodyStr, rawURL))
 	if icon == "" {
-		faviconURL := extractFaviconURL(bodyStr, rawURL)
-		icon = fetchFaviconBase64(ctx, faviconURL)
+		icon = svcIcon
 	}
 
 	return &probeResult{

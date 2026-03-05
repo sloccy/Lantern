@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -15,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -206,8 +208,8 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 		log.Printf("web: save: %v", err)
 	}
 
-	// Asynchronously fetch favicon if the service has no icon yet.
-	if svc.Icon == "" {
+	// Asynchronously fetch favicon if not already a real image (empty or emoji fallback).
+	if !strings.HasPrefix(svc.Icon, "data:") {
 		go func(id, target string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -311,7 +313,22 @@ func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
 // ---- Discovered -------------------------------------------------------------
 
 func (s *Server) listDiscovered(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.store.GetAllDiscovered())
+	discovered := s.store.GetAllDiscovered()
+	sort.Slice(discovered, func(i, j int) bool {
+		a := net.ParseIP(discovered[i].IP).To4()
+		b := net.ParseIP(discovered[j].IP).To4()
+		if a == nil {
+			a = net.ParseIP(discovered[i].IP)
+		}
+		if b == nil {
+			b = net.ParseIP(discovered[j].IP)
+		}
+		if cmp := bytes.Compare(a, b); cmp != 0 {
+			return cmp < 0
+		}
+		return discovered[i].Port < discovered[j].Port
+	})
+	writeJSON(w, http.StatusOK, discovered)
 }
 
 func (s *Server) deleteDiscovered(w http.ResponseWriter, r *http.Request) {
