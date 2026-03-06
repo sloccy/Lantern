@@ -58,9 +58,7 @@ type DiscoveredService struct {
 	DiscoveredAt  time.Time `json:"discovered_at"`
 }
 
-type Settings struct {
-	Background string `json:"background"` // CSS value: gradient or image URL
-}
+type Settings struct{}
 
 // TunnelInfo holds the persisted Cloudflare Tunnel credentials managed by Lantern.
 type TunnelInfo struct {

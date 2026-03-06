@@ -16,7 +16,6 @@ function showView(view) {
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  loadSettings();
   const hash = window.location.hash.replace('#', '');
   showView(hash === 'manage' ? 'manage' : 'home');
 });
@@ -307,7 +306,7 @@ async function _saveOrder(grid) {
 // ── Manage view ───────────────────────────────────────────────────────────────
 
 async function loadManage() {
-  await Promise.all([loadStatus(), loadTunnel(), loadScanSubnets(), loadServices(), loadBookmarks(), loadDiscovered(), loadDDNS(), loadIgnored(), loadSettings(), _refreshCategoryCache()]);
+  await Promise.all([loadStatus(), loadTunnel(), loadScanSubnets(), loadServices(), loadBookmarks(), loadDiscovered(), loadDDNS(), loadIgnored(), _refreshCategoryCache()]);
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -359,7 +358,7 @@ function renderStatus(s) {
     </div>
     <div class="status-cell">
       <div class="status-label">CF Tunnel</div>
-      ${s.tunnel_enabled
+      ${s.tunnel_available
         ? (s.tunnel_running
             ? `<span class="status-value ok">● Running</span><span style="font-size:.75rem;color:var(--muted);margin-left:.5rem">${esc(s.tunnel_id || '')}</span>`
             : `<span class="status-value" style="color:var(--muted)">${s.tunnel_id ? 'Stopped' : 'No tunnel'}</span>`)
@@ -432,7 +431,7 @@ async function _pollScanStatus() {
 async function loadTunnel() {
   const section = document.getElementById('tunnel-section');
   const el = document.getElementById('tunnel-content');
-  if (!statusData.tunnel_enabled) {
+  if (!statusData.tunnel_available) {
     section.style.display = 'none';
     return;
   }
@@ -1064,40 +1063,6 @@ async function submitAddDDNS() {
   }
 }
 
-// ── Settings / background ─────────────────────────────────────────────────────
-
-async function loadSettings() {
-  try {
-    const s = await api('GET', '/api/settings');
-    _applyBackground(s.background || '');
-    const input = document.getElementById('bg-input');
-    if (input) input.value = s.background || '';
-  } catch {}
-}
-
-function _applyBackground(value) {
-  document.body.style.background = value || '';
-}
-
-function _setBgPreset(value) {
-  const input = document.getElementById('bg-input');
-  if (input) input.value = value;
-}
-
-async function saveBackground(override) {
-  const value = override !== undefined ? override : (document.getElementById('bg-input')?.value.trim() || '');
-  try {
-    await api('PUT', '/api/settings', { background: value });
-    _applyBackground(value);
-    if (override === '') {
-      const input = document.getElementById('bg-input');
-      if (input) input.value = '';
-    }
-    toast('Background saved');
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-}
 
 // ── Bookmarks ─────────────────────────────────────────────────────────────────
 

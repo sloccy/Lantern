@@ -17,6 +17,12 @@ func (c *Client) TunnelEnabled() bool {
 	return c.tunnelEnabled()
 }
 
+// TunnelAvailable reports whether tunnel creation is possible (account configured),
+// even if no tunnel has been created yet.
+func (c *Client) TunnelAvailable() bool {
+	return !c.noop && c.accountID != ""
+}
+
 // AddTunnelRoute adds a hostname ingress rule to the tunnel and creates the
 // corresponding CNAME DNS record pointing to the tunnel endpoint.
 // Returns the CNAME DNS record ID for later cleanup.

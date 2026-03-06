@@ -528,6 +528,7 @@ type statusResponse struct {
 	PublicIP      string    `json:"public_ip"`
 	Domain        string    `json:"domain"`
 	ServerIP      string    `json:"server_ip"`
+	TunnelAvailable bool     `json:"tunnel_available"`
 	TunnelEnabled bool      `json:"tunnel_enabled"`
 	TunnelID      string    `json:"tunnel_id,omitempty"`
 	TunnelRunning bool      `json:"tunnel_running"`
@@ -562,6 +563,7 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 		PublicIP:      s.store.GetPublicIP(),
 		Domain:        s.cfg.Domain,
 		ServerIP:      s.cfg.ServerIP,
+		TunnelAvailable: s.cf.TunnelAvailable(),
 		TunnelEnabled: s.cf.TunnelEnabled(),
 		TunnelID:      tunnelID,
 		TunnelRunning: tunnelRunning,
