@@ -9,7 +9,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_NAME: ${{ github.repository_owner }}/lantern
 
 jobs:
   build:
@@ -29,7 +29,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version-file: "go.mod"
           cache: true   # caches $GOPATH/pkg/mod between runs
 
       - name: Tidy modules
@@ -87,5 +87,5 @@ jobs:
           cache-to: type=gha,mode=max
           # Pass build metadata for image inspection.
           build-args: |
-            BUILD_VERSION=${{ github.ref_name }}
+            BUILD_VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
             BUILD_COMMIT=${{ github.sha }}

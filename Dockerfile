@@ -41,11 +41,11 @@ RUN curl -fsSL -o /cloudflared \
     && chmod +x /cloudflared
 
 # ── Stage 2: final ────────────────────────────────────────────────────────────
-# base-debian13 (vs static) adds glibc, required for the dynamically-linked cloudflared binary.
-FROM gcr.io/distroless/base-debian13:nonroot
+# glibc-dynamic is required for the dynamically-linked cloudflared binary.
+# Chainguard images are rebuilt daily with security patches (lower CVE count than distroless).
+FROM cgr.dev/chainguard/glibc-dynamic:latest
 
-# CA certificates for outbound HTTPS (ipify, Cloudflare, ACME).
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# CA certificates are bundled in Chainguard images — no manual copy needed.
 
 # Binary.
 COPY --from=builder /build/lantern /lantern
