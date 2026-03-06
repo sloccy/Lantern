@@ -369,6 +369,18 @@ func (s *Store) UpsertNetworkDiscovered(svc *DiscoveredService) {
 	s.d.Discovered = append(s.d.Discovered, svc)
 }
 
+// UpdateDiscoveredIcon sets the icon for a discovered service by ID.
+func (s *Store) UpdateDiscoveredIcon(id, icon string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, d := range s.d.Discovered {
+		if d.ID == id {
+			d.Icon = icon
+			return
+		}
+	}
+}
+
 // ---- Ignored ----------------------------------------------------------------
 
 // IgnoreDiscovered moves a discovered entry into the ignored list.

@@ -201,6 +201,21 @@ func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name str
 		log.Printf("discovery: save store: %v", err)
 	}
 	log.Printf("discovery: auto-assigned %q → %s.%s (%s)", info.name, info.subdomain, d.cfg.Domain, info.target)
+
+	go func(id, target string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		icon := FetchFaviconForTarget(ctx, target)
+		if icon == "" {
+			return
+		}
+		if existing := d.store.GetServiceByID(id); existing != nil {
+			updated := *existing
+			updated.Icon = icon
+			d.store.UpdateService(id, &updated)
+			_ = d.store.Save()
+		}
+	}(svc.ID, svc.Target)
 }
 
 // resolveContainer determines the display name, subdomain and target URL for a container
@@ -279,6 +294,17 @@ func (d *Discoverer) addDockerDiscovered(id, name, target string) {
 	}
 	d.store.AddDiscovered(disc)
 	_ = d.store.Save()
+
+	go func(id, target string) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		icon := FetchFaviconForTarget(ctx, target)
+		if icon == "" {
+			return
+		}
+		d.store.UpdateDiscoveredIcon(id, icon)
+		_ = d.store.Save()
+	}(disc.ID, target)
 }
 
 func (d *Discoverer) removeContainer(ctx context.Context, id string) {
