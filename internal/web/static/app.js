@@ -306,7 +306,8 @@ async function _saveOrder(grid) {
 // ── Manage view ───────────────────────────────────────────────────────────────
 
 async function loadManage() {
-  await Promise.all([loadStatus(), loadTunnel(), loadScanSubnets(), loadServices(), loadBookmarks(), loadDiscovered(), loadDDNS(), loadIgnored(), _refreshCategoryCache()]);
+  await loadStatus(); // must complete first — other loaders depend on statusData
+  await Promise.all([loadTunnel(), loadScanSubnets(), loadServices(), loadBookmarks(), loadDiscovered(), loadDDNS(), loadIgnored(), _refreshCategoryCache()]);
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -431,7 +432,7 @@ async function _pollScanStatus() {
 async function loadTunnel() {
   const section = document.getElementById('tunnel-section');
   const el = document.getElementById('tunnel-content');
-  if (!statusData.tunnel_available) {
+  if (!statusData.tunnel_available && !statusData.tunnel_id) {
     section.style.display = 'none';
     return;
   }

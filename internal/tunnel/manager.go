@@ -26,6 +26,7 @@ type Manager struct {
 	store *store.Store
 	cfg   *config.Config
 
+	rootCtx context.Context    // application lifetime context for subprocess lifecycle
 	mu      sync.Mutex
 	cmd     *exec.Cmd
 	running bool
@@ -39,6 +40,7 @@ func New(cfg *config.Config, st *store.Store, cfClient *cf.Client) *Manager {
 // StartIfConfigured auto-starts cloudflared if tunnel credentials are already
 // persisted in the store (e.g. after a container restart).
 func (m *Manager) StartIfConfigured(ctx context.Context) error {
+	m.rootCtx = ctx
 	info := m.store.GetTunnel()
 	if info == nil {
 		return nil
@@ -65,7 +67,7 @@ func (m *Manager) Create(ctx context.Context) (*store.TunnelInfo, error) {
 	if err := m.store.Save(); err != nil {
 		log.Printf("tunnel: save store: %v", err)
 	}
-	if err := m.startProcess(ctx, token); err != nil {
+	if err := m.startProcess(m.rootCtx, token); err != nil {
 		return nil, err
 	}
 	return info, nil
