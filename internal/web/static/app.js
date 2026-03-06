@@ -307,7 +307,7 @@ async function _saveOrder(grid) {
 // ── Manage view ───────────────────────────────────────────────────────────────
 
 async function loadManage() {
-  await Promise.all([loadStatus(), loadScanSubnets(), loadServices(), loadBookmarks(), loadDiscovered(), loadDDNS(), loadIgnored(), loadSettings(), _refreshCategoryCache()]);
+  await Promise.all([loadStatus(), loadTunnel(), loadScanSubnets(), loadServices(), loadBookmarks(), loadDiscovered(), loadDDNS(), loadIgnored(), loadSettings(), _refreshCategoryCache()]);
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -356,6 +356,14 @@ function renderStatus(s) {
     <div class="status-cell">
       <div class="status-label">Server IP</div>
       <div class="status-value">${s.server_ip || '—'}</div>
+    </div>
+    <div class="status-cell">
+      <div class="status-label">CF Tunnel</div>
+      ${s.tunnel_enabled
+        ? (s.tunnel_running
+            ? `<span class="status-value ok">● Running</span><span style="font-size:.75rem;color:var(--muted);margin-left:.5rem">${esc(s.tunnel_id || '')}</span>`
+            : `<span class="status-value" style="color:var(--muted)">${s.tunnel_id ? 'Stopped' : 'No tunnel'}</span>`)
+        : '<div class="status-value" style="color:var(--muted)">—</div>'}
     </div>`;
 
   const logEl = document.getElementById('scan-log');
@@ -416,6 +424,73 @@ async function _pollScanStatus() {
   } catch (e) {
     document.getElementById('scan-btn').disabled = false;
     document.getElementById('scan-btn').textContent = '⟳ Scan Now';
+  }
+}
+
+// ── Cloudflare Tunnel ─────────────────────────────────────────────────────────
+
+async function loadTunnel() {
+  const section = document.getElementById('tunnel-section');
+  const el = document.getElementById('tunnel-content');
+  if (!statusData.tunnel_enabled) {
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+  try {
+    const t = await api('GET', '/api/tunnel').catch(e => null);
+    if (!t) {
+      el.innerHTML = `
+        <div style="display:flex;gap:.75rem;align-items:center">
+          <button class="btn btn-primary" onclick="createTunnel()">Create Tunnel</button>
+          <span style="color:var(--muted);font-size:.875rem">No tunnel configured. Create one to start routing services externally.</span>
+        </div>`;
+    } else {
+      const created = t.created_at ? new Date(t.created_at).toLocaleDateString() : '—';
+      const statusDot = t.running
+        ? '<span style="color:var(--success)">● Running</span>'
+        : '<span style="color:var(--muted)">○ Stopped</span>';
+      el.innerHTML = `
+        <div class="status-grid" style="margin-bottom:1rem">
+          <div class="status-cell">
+            <div class="status-label">Tunnel ID</div>
+            <div class="status-value" style="font-family:monospace;font-size:.85rem">${esc(t.tunnel_id)}</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Status</div>
+            <div class="status-value">${statusDot}</div>
+          </div>
+          <div class="status-cell">
+            <div class="status-label">Created</div>
+            <div class="status-value">${created}</div>
+          </div>
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="deleteTunnel()">Delete Tunnel</button>`;
+    }
+  } catch (e) {
+    el.innerHTML = `<p style="color:var(--danger)">${e.message}</p>`;
+  }
+}
+
+async function createTunnel() {
+  if (!confirm('Create a Cloudflare Tunnel named "lantern"? This will start cloudflared and begin routing.')) return;
+  try {
+    await api('POST', '/api/tunnel');
+    toast('Tunnel created and started');
+    await Promise.all([loadTunnel(), loadStatus()]);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function deleteTunnel() {
+  if (!confirm('Delete the Cloudflare Tunnel? This will stop cloudflared and remove the tunnel from Cloudflare. Existing tunnel routes will no longer work.')) return;
+  try {
+    await api('DELETE', '/api/tunnel');
+    toast('Tunnel deleted');
+    await Promise.all([loadTunnel(), loadStatus()]);
+  } catch (e) {
+    toast(e.message, 'error');
   }
 }
 
@@ -519,13 +594,16 @@ function serviceRow(svc, domain) {
     icon = `<img class="svc-icon" src="${faviconSrc}" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='inline-flex'"><span class="svc-icon-placeholder" style="display:none">${svcEmoji(svc)}</span>`;
   }
   const tag = `<span class="tag tag-${svc.source}">${svc.source}</span>`;
+  const tunnelBadge = svc.tunnel_route_id
+    ? `<span class="tag tag-tunnel" title="Routed via Cloudflare Tunnel">tunnel</span>`
+    : '';
   return `
     <tr>
       <td class="td-icon">${icon}</td>
       <td><strong>${esc(svc.name)}</strong></td>
       <td class="link-cell"><a href="${esc(url)}" target="_blank" rel="noopener">${esc(svc.subdomain)}.${esc(domain)}</a></td>
       <td><code style="font-size:.8rem;color:var(--muted)">${esc(svc.target)}</code></td>
-      <td>${tag}</td>
+      <td>${tag} ${tunnelBadge}</td>
       <td>
         <div class="actions">
           <button class="btn btn-ghost btn-sm" onclick="showEditModal('${esc(svc.id)}')">✏ Edit</button>
@@ -536,7 +614,7 @@ function serviceRow(svc, domain) {
 }
 
 async function deleteService(id, name) {
-  if (!confirm(`Remove service "${name}" and its DNS record?`)) return;
+  if (!confirm(`Remove service "${name}" and its DNS and tunnel records?`)) return;
   try {
     await api('DELETE', `/api/services/${id}`);
     toast(`Removed ${name}`);
@@ -706,13 +784,24 @@ function closeModal() {
 }
 
 // Assign a discovered service
+function _tunnelToggle(checked) {
+  if (!statusData.tunnel_enabled) return '';
+  return `
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer">
+        <input id="m-tunnel" type="checkbox" ${checked ? 'checked' : ''} style="width:1rem;height:1rem;accent-color:var(--accent)">
+        Route via Cloudflare Tunnel
+        <span style="color:var(--muted);font-weight:400;font-size:.8rem">(no open ports needed)</span>
+      </label>
+    </div>`;
+}
+
 function showAssignModal(id, title) {
   const suggested = sanitiseSubdomain(title);
   openModal(`
     <h3>Assign Subdomain</h3>
     <p style="color:var(--muted);font-size:.875rem;margin-bottom:1.25rem">
       Assign a subdomain for <strong>${esc(title)}</strong>.
-      A DNS record will be created automatically.
     </p>
     <div class="form-group">
       <label>Service Name</label>
@@ -728,6 +817,7 @@ function showAssignModal(id, title) {
       <input id="m-category" type="text" list="category-list" placeholder="e.g. Media">
       ${_categoryDatalist()}
     </div>
+    ${_tunnelToggle(false)}
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitAssign('${esc(id)}')">Assign →</button>
@@ -743,9 +833,10 @@ async function submitAssign(discoveredID) {
   const name      = document.getElementById('m-name').value.trim();
   const subdomain = document.getElementById('m-sub').value.trim();
   const category  = document.getElementById('m-category').value.trim();
+  const tunnel    = document.getElementById('m-tunnel')?.checked ?? false;
   if (!subdomain) { toast('Subdomain is required', 'error'); return; }
   try {
-    await api('POST', '/api/services', { discovered_id: discoveredID, name, subdomain, category });
+    await api('POST', '/api/services', { discovered_id: discoveredID, name, subdomain, category, tunnel });
     closeModal();
     toast(`Assigned ${subdomain}.${statusData.domain || ''}`);
     loadServices();
@@ -777,6 +868,7 @@ function showAddManualModal() {
       <input id="m-category" type="text" list="category-list" placeholder="e.g. Media">
       ${_categoryDatalist()}
     </div>
+    ${_tunnelToggle(false)}
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitAddManual()">Add →</button>
@@ -793,10 +885,11 @@ async function submitAddManual() {
   const subdomain = document.getElementById('m-sub').value.trim();
   const target    = document.getElementById('m-target').value.trim();
   const category  = document.getElementById('m-category').value.trim();
+  const tunnel    = document.getElementById('m-tunnel')?.checked ?? false;
   if (!subdomain) { toast('Subdomain is required', 'error'); return; }
   if (!target)    { toast('Target URL is required', 'error'); return; }
   try {
-    await api('POST', '/api/services', { name, subdomain, target, category });
+    await api('POST', '/api/services', { name, subdomain, target, category, tunnel });
     closeModal();
     toast(`Added ${subdomain}.${statusData.domain || ''}`);
     loadServices();
@@ -855,6 +948,7 @@ async function showEditModal(id) {
       </div>
       <div class="input-hint">Upload a custom icon, pull from the service, or leave empty to use the live favicon proxy.</div>
     </div>
+    ${_tunnelToggle(!!svc.tunnel_route_id)}
     <div class="form-actions">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitEdit('${esc(id)}')">Save →</button>
@@ -908,7 +1002,12 @@ async function submitEdit(id) {
   const subdomain = document.getElementById('m-sub').value.trim();
   const target    = document.getElementById('m-target').value.trim();
   const category  = document.getElementById('m-category').value.trim();
+  const tunnelEl  = document.getElementById('m-tunnel');
+  const tunnel    = tunnelEl ? tunnelEl.checked : undefined;
   if (!subdomain) { toast('Subdomain is required', 'error'); return; }
+  const body = tunnel !== undefined
+    ? { name, subdomain, target, category, tunnel }
+    : { name, subdomain, target, category };
   try {
     const fileInput = document.getElementById('m-icon-file');
     if (fileInput && fileInput.files[0]) {
@@ -919,12 +1018,12 @@ async function submitEdit(id) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.error || `HTTP ${res.status}`);
       }
-      await api('PUT', `/api/services/${id}`, { name, subdomain, target, category });
+      await api('PUT', `/api/services/${id}`, body);
     } else if (fileInput && fileInput.dataset.pendingClear === 'yes') {
       await api('DELETE', `/api/services/${id}/icon`);
-      await api('PUT', `/api/services/${id}`, { name, subdomain, target, category });
+      await api('PUT', `/api/services/${id}`, body);
     } else {
-      await api('PUT', `/api/services/${id}`, { name, subdomain, target, category });
+      await api('PUT', `/api/services/${id}`, body);
     }
     closeModal();
     toast('Service updated');

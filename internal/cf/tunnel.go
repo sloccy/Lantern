@@ -1,0 +1,151 @@
+package cf
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cloudflare/cloudflare-go"
+)
+
+// tunnelEnabled reports whether tunnel management is fully configured.
+func (c *Client) tunnelEnabled() bool {
+	return !c.noop && c.tunnelID != "" && c.accountID != ""
+}
+
+// TunnelEnabled reports whether Cloudflare Tunnel management is active.
+func (c *Client) TunnelEnabled() bool {
+	return c.tunnelEnabled()
+}
+
+// AddTunnelRoute adds a hostname ingress rule to the tunnel and creates the
+// corresponding CNAME DNS record pointing to the tunnel endpoint.
+// Returns the CNAME DNS record ID for later cleanup.
+func (c *Client) AddTunnelRoute(ctx context.Context, hostname, backend string) (cnameID string, err error) {
+	if !c.tunnelEnabled() {
+		return "", nil
+	}
+	if err := c.modifyIngress(ctx, func(rules []cloudflare.UnvalidatedIngressRule) []cloudflare.UnvalidatedIngressRule {
+		return append(rules, cloudflare.UnvalidatedIngressRule{Hostname: hostname, Service: backend})
+	}); err != nil {
+		return "", fmt.Errorf("add tunnel route %s: %w", hostname, err)
+	}
+	cnameID, err = c.createCNAME(ctx, hostname)
+	if err != nil {
+		return "", fmt.Errorf("create CNAME for %s: %w", hostname, err)
+	}
+	return cnameID, nil
+}
+
+// RemoveTunnelRoute removes the hostname ingress rule from the tunnel and
+// deletes its CNAME DNS record.
+func (c *Client) RemoveTunnelRoute(ctx context.Context, hostname, cnameID string) error {
+	if !c.tunnelEnabled() {
+		return nil
+	}
+	if err := c.modifyIngress(ctx, func(rules []cloudflare.UnvalidatedIngressRule) []cloudflare.UnvalidatedIngressRule {
+		var filtered []cloudflare.UnvalidatedIngressRule
+		for _, r := range rules {
+			if r.Hostname != hostname {
+				filtered = append(filtered, r)
+			}
+		}
+		return filtered
+	}); err != nil {
+		return fmt.Errorf("remove tunnel route %s: %w", hostname, err)
+	}
+	if cnameID != "" {
+		if err := c.DeleteRecord(ctx, cnameID); err != nil {
+			return fmt.Errorf("delete CNAME for %s: %w", hostname, err)
+		}
+	}
+	return nil
+}
+
+// ReplaceTunnelRoute atomically removes an old hostname route and adds a new one
+// in a single ingress update, then swaps the CNAME DNS record.
+// Returns the new CNAME record ID.
+func (c *Client) ReplaceTunnelRoute(ctx context.Context, oldHostname, newHostname, backend, oldCNAMEID string) (newCNAMEID string, err error) {
+	if !c.tunnelEnabled() {
+		return "", nil
+	}
+	if err := c.modifyIngress(ctx, func(rules []cloudflare.UnvalidatedIngressRule) []cloudflare.UnvalidatedIngressRule {
+		var filtered []cloudflare.UnvalidatedIngressRule
+		for _, r := range rules {
+			if r.Hostname != oldHostname {
+				filtered = append(filtered, r)
+			}
+		}
+		return append(filtered, cloudflare.UnvalidatedIngressRule{Hostname: newHostname, Service: backend})
+	}); err != nil {
+		return "", fmt.Errorf("replace tunnel route %s→%s: %w", oldHostname, newHostname, err)
+	}
+	if oldCNAMEID != "" {
+		if err := c.DeleteRecord(ctx, oldCNAMEID); err != nil {
+			// Log-only: new CNAME creation is more important.
+			_ = fmt.Errorf("delete old CNAME %s: %w", oldHostname, err)
+		}
+	}
+	newCNAMEID, err = c.createCNAME(ctx, newHostname)
+	if err != nil {
+		return "", fmt.Errorf("create CNAME for %s: %w", newHostname, err)
+	}
+	return newCNAMEID, nil
+}
+
+// modifyIngress applies fn to the current tunnel ingress rules while holding
+// the tunnel mutex, always ensuring the catch-all rule is last.
+func (c *Client) modifyIngress(ctx context.Context, fn func([]cloudflare.UnvalidatedIngressRule) []cloudflare.UnvalidatedIngressRule) error {
+	c.tunnelMu.Lock()
+	defer c.tunnelMu.Unlock()
+
+	rc := cloudflare.AccountIdentifier(c.accountID)
+	result, err := c.api.GetTunnelConfiguration(ctx, rc, c.tunnelID)
+	if err != nil {
+		return fmt.Errorf("get tunnel config: %w", err)
+	}
+
+	// Separate named rules from the catch-all (Hostname == "").
+	var named []cloudflare.UnvalidatedIngressRule
+	var catchAll *cloudflare.UnvalidatedIngressRule
+	for i, r := range result.Config.Ingress {
+		if r.Hostname == "" {
+			catchAll = &result.Config.Ingress[i]
+		} else {
+			named = append(named, r)
+		}
+	}
+
+	named = fn(named)
+
+	// Always re-append catch-all last; create a default if one wasn't present.
+	if catchAll != nil {
+		named = append(named, *catchAll)
+	} else {
+		named = append(named, cloudflare.UnvalidatedIngressRule{Service: "http_status:404"})
+	}
+
+	_, err = c.api.UpdateTunnelConfiguration(ctx, rc, cloudflare.TunnelConfigurationParams{
+		TunnelID: c.tunnelID,
+		Config:   cloudflare.TunnelConfiguration{Ingress: named},
+	})
+	return err
+}
+
+// createCNAME creates a proxied CNAME record pointing to the tunnel endpoint.
+func (c *Client) createCNAME(ctx context.Context, hostname string) (string, error) {
+	if c.noop || c.zoneID == "" {
+		return "", nil
+	}
+	proxied := true
+	rec, err := c.api.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(c.zoneID), cloudflare.CreateDNSRecordParams{
+		Type:    "CNAME",
+		Name:    hostname,
+		Content: c.tunnelID + ".cfargotunnel.com",
+		TTL:     1, // automatic TTL for proxied records
+		Proxied: &proxied,
+	})
+	if err != nil {
+		return "", fmt.Errorf("create CNAME %s: %w", hostname, err)
+	}
+	return rec.ID, nil
+}

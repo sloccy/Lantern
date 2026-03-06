@@ -2,20 +2,29 @@ package cf
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
+	"sync"
 
 	"github.com/cloudflare/cloudflare-go"
 )
 
-// Client wraps the Cloudflare API for DNS record management.
+// Client wraps the Cloudflare API for DNS record and tunnel management.
 // When created with an empty token, all methods become no-ops that return nil errors.
 type Client struct {
-	api    *cloudflare.API
-	zoneID string
-	noop   bool
+	api       *cloudflare.API
+	zoneID    string
+	noop      bool
+	tunnelID  string
+	accountID string
+	tunnelMu  sync.Mutex // serialises get-modify-put on tunnel config
 }
 
-func New(token, zoneID string) (*Client, error) {
+// New creates a Cloudflare client. All four values are optional — the client
+// becomes a no-op for DNS when token/zoneID are absent, and tunnel management
+// is disabled when tunnelID/accountID are absent.
+func New(token, zoneID, tunnelID, accountID string) (*Client, error) {
 	if token == "" || zoneID == "" {
 		return &Client{noop: true}, nil
 	}
@@ -23,7 +32,7 @@ func New(token, zoneID string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloudflare client: %w", err)
 	}
-	return &Client{api: api, zoneID: zoneID}, nil
+	return &Client{api: api, zoneID: zoneID, tunnelID: tunnelID, accountID: accountID}, nil
 }
 
 // CreateRecord creates an A record and returns its ID.
@@ -68,6 +77,49 @@ func (c *Client) DeleteRecord(ctx context.Context, recordID string) error {
 		return nil
 	}
 	return c.api.DeleteDNSRecord(ctx, cloudflare.ZoneIdentifier(c.zoneID), recordID)
+}
+
+// CreateTunnel creates a new named Cloudflare Tunnel and returns its ID and token.
+// The caller is responsible for persisting the token — it authenticates cloudflared.
+func (c *Client) CreateTunnel(ctx context.Context, name string) (tunnelID, token string, err error) {
+	if c.noop || c.accountID == "" {
+		return "", "", fmt.Errorf("cloudflare account not configured")
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", "", fmt.Errorf("generate tunnel secret: %w", err)
+	}
+	rc := cloudflare.AccountIdentifier(c.accountID)
+	tunnel, err := c.api.CreateTunnel(ctx, rc, cloudflare.TunnelCreateParams{
+		Name:      name,
+		Secret:    base64.StdEncoding.EncodeToString(secret),
+		ConfigSrc: "cloudflare",
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("create tunnel: %w", err)
+	}
+	token, err = c.api.GetTunnelToken(ctx, rc, tunnel.ID)
+	if err != nil {
+		return "", "", fmt.Errorf("get tunnel token: %w", err)
+	}
+	c.SetTunnelID(tunnel.ID)
+	return tunnel.ID, token, nil
+}
+
+// DeleteTunnel deletes a Cloudflare Tunnel by ID.
+func (c *Client) DeleteTunnel(ctx context.Context, tunnelID string) error {
+	if c.noop || c.accountID == "" {
+		return nil
+	}
+	rc := cloudflare.AccountIdentifier(c.accountID)
+	return c.api.DeleteTunnel(ctx, rc, tunnelID)
+}
+
+// SetTunnelID updates the active tunnel ID used for ingress management.
+func (c *Client) SetTunnelID(id string) {
+	c.tunnelMu.Lock()
+	c.tunnelID = id
+	c.tunnelMu.Unlock()
 }
 
 // FindRecord looks up a record ID and current IP by exact name.

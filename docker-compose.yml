@@ -43,7 +43,12 @@ services:
       # Cloudflare Zone ID (found in the zone overview page).
       CF_ZONE_ID: ""
 
-      # Local IP of this server — used for DNS A records.
+      # Cloudflare Account ID (found on the dashboard right sidebar).
+      # Required for tunnel management. Once set, use Manage → Cloudflare Tunnel
+      # in the UI to create the tunnel. The ID and token are persisted automatically.
+      # CF_ACCOUNT_ID: ""
+
+      # Local IP of this server — used for DNS A records (not needed in tunnel mode).
       SERVER_IP: ""
 
       # Data directory inside the container (maps to the volume above).

@@ -149,8 +149,17 @@ func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name str
 		CreatedAt:   time.Now(),
 	}
 
-	if d.cfg.ServerIP != "" {
-		dnsID, err := d.cf.CreateRecord(ctx, info.subdomain+"."+d.cfg.Domain, d.cfg.ServerIP)
+	hostname := info.subdomain + "." + d.cfg.Domain
+	if labels["lantern.tunnel"] == "true" && d.cf.TunnelEnabled() {
+		cnameID, err := d.cf.AddTunnelRoute(ctx, hostname, info.target)
+		if err != nil {
+			log.Printf("discovery: add tunnel route for %s: %v", info.subdomain, err)
+		} else {
+			svc.DNSRecordID = cnameID
+			svc.TunnelRouteID = hostname
+		}
+	} else if d.cfg.ServerIP != "" {
+		dnsID, err := d.cf.CreateRecord(ctx, hostname, d.cfg.ServerIP)
 		if err != nil {
 			log.Printf("discovery: create DNS for %s: %v", info.subdomain, err)
 		} else {
@@ -245,8 +254,12 @@ func (d *Discoverer) addDockerDiscovered(id, name, target string) {
 
 func (d *Discoverer) removeContainer(ctx context.Context, id string) {
 	if svc := d.store.GetServiceByContainerID(id); svc != nil {
-		_, dnsID := d.store.DeleteService(svc.ID)
-		if dnsID != "" {
+		_, dnsID, tunnelRoute := d.store.DeleteService(svc.ID)
+		if tunnelRoute != "" {
+			if err := d.cf.RemoveTunnelRoute(ctx, tunnelRoute, dnsID); err != nil {
+				log.Printf("discovery: remove tunnel route for %s: %v", svc.Subdomain, err)
+			}
+		} else if dnsID != "" {
 			if err := d.cf.DeleteRecord(ctx, dnsID); err != nil {
 				log.Printf("discovery: delete DNS for %s: %v", svc.Subdomain, err)
 			}

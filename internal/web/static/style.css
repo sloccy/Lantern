@@ -364,6 +364,7 @@ tr:hover td { background: var(--surface2); }
 .tag-docker  { background: #1e3a5f; color: #93c5fd; }
 .tag-network { background: #1e3d2f; color: #6ee7b7; }
 .tag-manual  { background: #3b2e6e; color: #c4b5fd; }
+.tag-tunnel  { background: rgba(249,130,50,.15); color: #f98232; }
 
 .actions { display: flex; gap: .5rem; }
 .link-cell a { color: var(--accent); font-family: monospace; font-size: .85rem; }

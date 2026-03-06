@@ -18,10 +18,11 @@ type Service struct {
 	Icon        string    `json:"icon,omitempty"`
 	Category    string    `json:"category,omitempty"`
 	Order       int       `json:"order,omitempty"`
-	Source      string    `json:"source"` // "docker" | "network" | "manual"
-	ContainerID string    `json:"container_id,omitempty"`
-	DNSRecordID string    `json:"dns_record_id,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
+	Source         string    `json:"source"` // "docker" | "network" | "manual"
+	ContainerID    string    `json:"container_id,omitempty"`
+	DNSRecordID    string    `json:"dns_record_id,omitempty"`
+	TunnelRouteID  string    `json:"tunnel_route_id,omitempty"` // hostname routed via CF tunnel
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 // Bookmark is a plain external link shown on the homepage.
@@ -61,6 +62,13 @@ type Settings struct {
 	Background string `json:"background"` // CSS value: gradient or image URL
 }
 
+// TunnelInfo holds the persisted Cloudflare Tunnel credentials managed by Lantern.
+type TunnelInfo struct {
+	TunnelID  string    `json:"tunnel_id"`
+	Token     string    `json:"token"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type data struct {
 	Services     map[string]*Service   `json:"services"`
 	Discovered   []*DiscoveredService  `json:"discovered"`
@@ -71,6 +79,7 @@ type data struct {
 	ScanSubnets  []string              `json:"scan_subnets"`
 	LastScan     time.Time             `json:"last_scan"`
 	PublicIP     string                `json:"public_ip"`
+	Tunnel       *TunnelInfo           `json:"tunnel,omitempty"`
 }
 
 // Store is a thread-safe, JSON-backed persistence layer.
@@ -186,13 +195,14 @@ func (s *Store) UpdateService(id string, updated *Service) (oldSub, oldDNSID str
 	return
 }
 
-func (s *Store) DeleteService(id string) (sub, dnsID string) {
+func (s *Store) DeleteService(id string) (sub, dnsID, tunnelRoute string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, svc := range s.d.Services {
 		if svc.ID == id {
 			sub = k
 			dnsID = svc.DNSRecordID
+			tunnelRoute = svc.TunnelRouteID
 			delete(s.d.Services, k)
 			return
 		}
@@ -549,4 +559,24 @@ func (s *Store) GetPublicIP() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.d.PublicIP
+}
+
+// ---- Tunnel -----------------------------------------------------------------
+
+func (s *Store) GetTunnel() *TunnelInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.d.Tunnel
+}
+
+func (s *Store) SetTunnel(info *TunnelInfo) {
+	s.mu.Lock()
+	s.d.Tunnel = info
+	s.mu.Unlock()
+}
+
+func (s *Store) ClearTunnel() {
+	s.mu.Lock()
+	s.d.Tunnel = nil
+	s.mu.Unlock()
 }

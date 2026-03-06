@@ -26,6 +26,7 @@ import (
 	"lantern/internal/discovery"
 	"lantern/internal/store"
 	"lantern/internal/sysinfo"
+	"lantern/internal/tunnel"
 )
 
 // faviconClient is used to proxy favicon requests to internal services.
@@ -61,6 +62,7 @@ type Server struct {
 	store    *store.Store
 	cf       *cf.Client
 	scanner  Scanner
+	tunnel   *tunnel.Manager
 	mux      *http.ServeMux
 	healthMu sync.RWMutex
 	health   map[string]string // service ID → "up" | "down"
@@ -73,7 +75,8 @@ func New(cfg *config.Config, st *store.Store, cfClient *cf.Client) *Server {
 	return s
 }
 
-func (s *Server) SetScanner(sc Scanner) { s.scanner = sc }
+func (s *Server) SetScanner(sc Scanner)              { s.scanner = sc }
+func (s *Server) SetTunnelManager(t *tunnel.Manager) { s.tunnel = t }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
@@ -125,6 +128,10 @@ func (s *Server) routes() {
 
 	s.mux.HandleFunc("GET /api/settings", s.getSettings)
 	s.mux.HandleFunc("PUT /api/settings", s.updateSettings)
+
+	s.mux.HandleFunc("GET /api/tunnel", s.getTunnel)
+	s.mux.HandleFunc("POST /api/tunnel", s.createTunnel)
+	s.mux.HandleFunc("DELETE /api/tunnel", s.deleteTunnel)
 }
 
 // ---- Health checker ---------------------------------------------------------
@@ -213,6 +220,7 @@ type createServiceRequest struct {
 	Subdomain    string `json:"subdomain"`
 	Target       string `json:"target"` // required if not from discovered
 	Category     string `json:"category"`
+	Tunnel       bool   `json:"tunnel"` // route via CF tunnel instead of A record
 }
 
 func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
@@ -276,12 +284,23 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   time.Now(),
 	}
 
-	// Create DNS record.
-	dnsID, err := s.cf.CreateRecord(r.Context(), req.Subdomain+"."+s.cfg.Domain, s.cfg.ServerIP)
-	if err != nil {
-		log.Printf("web: create DNS %s: %v", req.Subdomain, err)
-	} else {
-		svc.DNSRecordID = dnsID
+	// Create tunnel route or DNS A record based on per-service choice.
+	hostname := req.Subdomain + "." + s.cfg.Domain
+	if req.Tunnel && s.cf.TunnelEnabled() {
+		cnameID, err := s.cf.AddTunnelRoute(r.Context(), hostname, svc.Target)
+		if err != nil {
+			log.Printf("web: add tunnel route %s: %v", req.Subdomain, err)
+		} else {
+			svc.DNSRecordID = cnameID
+			svc.TunnelRouteID = hostname
+		}
+	} else if s.cfg.ServerIP != "" {
+		dnsID, err := s.cf.CreateRecord(r.Context(), hostname, s.cfg.ServerIP)
+		if err != nil {
+			log.Printf("web: create DNS %s: %v", req.Subdomain, err)
+		} else {
+			svc.DNSRecordID = dnsID
+		}
 	}
 
 	s.store.AddService(svc)
@@ -318,7 +337,8 @@ type updateServiceRequest struct {
 	Subdomain string  `json:"subdomain"`
 	Target    string  `json:"target"`
 	Category  string  `json:"category"`
-	Icon      *string `json:"icon"` // nil = keep existing; "" = clear; non-empty = set
+	Icon      *string `json:"icon"`    // nil = keep existing; "" = clear; non-empty = set
+	Tunnel    *bool   `json:"tunnel"`  // nil = keep existing; true/false = enable/disable
 }
 
 func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
@@ -342,16 +362,18 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 
 	oldSub := svc.Subdomain
 	oldDNSID := svc.DNSRecordID
+	oldTunnelRoute := svc.TunnelRouteID
 
 	icon := svc.Icon
 	if req.Icon != nil {
 		icon = *req.Icon
 	}
+	newTarget := firstNonEmpty(req.Target, svc.Target)
 	updated := &store.Service{
 		ID:          svc.ID,
 		Name:        firstNonEmpty(req.Name, svc.Name),
 		Subdomain:   newSub,
-		Target:      firstNonEmpty(req.Target, svc.Target),
+		Target:      newTarget,
 		Icon:        icon,
 		Category:    req.Category,
 		Source:      svc.Source,
@@ -359,20 +381,79 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:   svc.CreatedAt,
 	}
 
-	if newSub != oldSub {
-		if oldDNSID != "" {
-			if err := s.cf.DeleteRecord(r.Context(), oldDNSID); err != nil {
-				log.Printf("web: delete DNS %s: %v", oldSub, err)
+	// Determine whether the caller wants tunnel on/off (nil = keep current state).
+	currentlyTunneled := oldTunnelRoute != ""
+	wantTunnel := currentlyTunneled
+	if req.Tunnel != nil {
+		wantTunnel = *req.Tunnel
+	}
+
+	oldHostname := oldSub + "." + s.cfg.Domain
+	newHostname := newSub + "." + s.cfg.Domain
+
+	if s.cf.TunnelEnabled() && wantTunnel {
+		if currentlyTunneled {
+			// Already tunneled — re-route only if something changed.
+			if newSub != oldSub || newTarget != svc.Target {
+				cnameID, err := s.cf.ReplaceTunnelRoute(r.Context(), oldHostname, newHostname, newTarget, oldDNSID)
+				if err != nil {
+					log.Printf("web: replace tunnel route %s→%s: %v", oldSub, newSub, err)
+				} else {
+					updated.DNSRecordID = cnameID
+					updated.TunnelRouteID = newHostname
+				}
+			} else {
+				updated.DNSRecordID = oldDNSID
+				updated.TunnelRouteID = oldTunnelRoute
+			}
+		} else {
+			// Switching from A record to tunnel.
+			if oldDNSID != "" {
+				if err := s.cf.DeleteRecord(r.Context(), oldDNSID); err != nil {
+					log.Printf("web: delete DNS %s: %v", oldSub, err)
+				}
+			}
+			cnameID, err := s.cf.AddTunnelRoute(r.Context(), newHostname, newTarget)
+			if err != nil {
+				log.Printf("web: add tunnel route %s: %v", newSub, err)
+			} else {
+				updated.DNSRecordID = cnameID
+				updated.TunnelRouteID = newHostname
 			}
 		}
-		dnsID, err := s.cf.CreateRecord(r.Context(), newSub+"."+s.cfg.Domain, s.cfg.ServerIP)
-		if err != nil {
-			log.Printf("web: create DNS %s: %v", newSub, err)
-		} else {
-			updated.DNSRecordID = dnsID
-		}
 	} else {
-		updated.DNSRecordID = oldDNSID
+		// Want A record (or tunnel not configured).
+		if currentlyTunneled {
+			// Switching from tunnel to A record.
+			if err := s.cf.RemoveTunnelRoute(r.Context(), oldTunnelRoute, oldDNSID); err != nil {
+				log.Printf("web: remove tunnel route %s: %v", oldSub, err)
+			}
+			if s.cfg.ServerIP != "" {
+				dnsID, err := s.cf.CreateRecord(r.Context(), newHostname, s.cfg.ServerIP)
+				if err != nil {
+					log.Printf("web: create DNS %s: %v", newSub, err)
+				} else {
+					updated.DNSRecordID = dnsID
+				}
+			}
+		} else if newSub != oldSub {
+			// Subdomain changed, swap A records.
+			if oldDNSID != "" {
+				if err := s.cf.DeleteRecord(r.Context(), oldDNSID); err != nil {
+					log.Printf("web: delete DNS %s: %v", oldSub, err)
+				}
+			}
+			if s.cfg.ServerIP != "" {
+				dnsID, err := s.cf.CreateRecord(r.Context(), newHostname, s.cfg.ServerIP)
+				if err != nil {
+					log.Printf("web: create DNS %s: %v", newSub, err)
+				} else {
+					updated.DNSRecordID = dnsID
+				}
+			}
+		} else {
+			updated.DNSRecordID = oldDNSID
+		}
 	}
 
 	s.store.UpdateService(id, updated)
@@ -384,8 +465,12 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	_, dnsID := s.store.DeleteService(id)
-	if dnsID != "" {
+	_, dnsID, tunnelRoute := s.store.DeleteService(id)
+	if tunnelRoute != "" {
+		if err := s.cf.RemoveTunnelRoute(r.Context(), tunnelRoute, dnsID); err != nil {
+			log.Printf("web: remove tunnel route: %v", err)
+		}
+	} else if dnsID != "" {
 		if err := s.cf.DeleteRecord(r.Context(), dnsID); err != nil {
 			log.Printf("web: delete DNS record: %v", err)
 		}
@@ -436,14 +521,17 @@ func (s *Server) triggerScan(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusResponse struct {
-	Scanning     bool      `json:"scanning"`
-	LastScan     time.Time `json:"last_scan"`
-	NextScan     time.Time `json:"next_scan"`
-	ScanInterval string    `json:"scan_interval"`
-	PublicIP     string    `json:"public_ip"`
-	Domain       string    `json:"domain"`
-	ServerIP     string    `json:"server_ip"`
-	ScanLog      []string  `json:"scan_log,omitempty"`
+	Scanning      bool      `json:"scanning"`
+	LastScan      time.Time `json:"last_scan"`
+	NextScan      time.Time `json:"next_scan"`
+	ScanInterval  string    `json:"scan_interval"`
+	PublicIP      string    `json:"public_ip"`
+	Domain        string    `json:"domain"`
+	ServerIP      string    `json:"server_ip"`
+	TunnelEnabled bool      `json:"tunnel_enabled"`
+	TunnelID      string    `json:"tunnel_id,omitempty"`
+	TunnelRunning bool      `json:"tunnel_running"`
+	ScanLog       []string  `json:"scan_log,omitempty"`
 }
 
 func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
@@ -454,16 +542,81 @@ func (s *Server) getStatus(w http.ResponseWriter, r *http.Request) {
 		scanning, last, next = s.scanner.Status()
 		scanLog = s.scanner.ScanLog()
 	}
+	tunnelID := ""
+	tunnelRunning := false
+	if s.tunnel != nil {
+		st := s.tunnel.Status()
+		tunnelRunning = st.Running
+		if st.TunnelID != "" && len(st.TunnelID) >= 8 {
+			tunnelID = st.TunnelID[:8] + "…"
+		}
+	} else if s.cf.TunnelEnabled() && len(s.cfg.CFTunnelID) >= 8 {
+		// Fallback: externally-managed tunnel via env var (no manager).
+		tunnelID = s.cfg.CFTunnelID[:8] + "…"
+	}
 	writeJSON(w, http.StatusOK, statusResponse{
-		Scanning:     scanning,
-		LastScan:     last,
-		NextScan:     next,
-		ScanInterval: s.cfg.ScanInterval.String(),
-		PublicIP:     s.store.GetPublicIP(),
-		Domain:       s.cfg.Domain,
-		ServerIP:     s.cfg.ServerIP,
-		ScanLog:      scanLog,
+		Scanning:      scanning,
+		LastScan:      last,
+		NextScan:      next,
+		ScanInterval:  s.cfg.ScanInterval.String(),
+		PublicIP:      s.store.GetPublicIP(),
+		Domain:        s.cfg.Domain,
+		ServerIP:      s.cfg.ServerIP,
+		TunnelEnabled: s.cf.TunnelEnabled(),
+		TunnelID:      tunnelID,
+		TunnelRunning: tunnelRunning,
+		ScanLog:       scanLog,
 	})
+}
+
+// ---- Tunnel -----------------------------------------------------------------
+
+func (s *Server) getTunnel(w http.ResponseWriter, r *http.Request) {
+	if s.tunnel == nil {
+		apiError(w, http.StatusNotFound, "tunnel manager not available")
+		return
+	}
+	st := s.tunnel.Status()
+	if st.TunnelID == "" {
+		apiError(w, http.StatusNotFound, "no tunnel configured")
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) createTunnel(w http.ResponseWriter, r *http.Request) {
+	if s.tunnel == nil {
+		apiError(w, http.StatusServiceUnavailable, "tunnel manager not available")
+		return
+	}
+	if st := s.tunnel.Status(); st.TunnelID != "" {
+		apiError(w, http.StatusConflict, "tunnel already exists")
+		return
+	}
+	info, err := s.tunnel.Create(r.Context())
+	if err != nil {
+		log.Printf("web: create tunnel: %v", err)
+		apiError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, tunnel.TunnelStatus{
+		TunnelID:  info.TunnelID,
+		Running:   true,
+		CreatedAt: info.CreatedAt,
+	})
+}
+
+func (s *Server) deleteTunnel(w http.ResponseWriter, r *http.Request) {
+	if s.tunnel == nil {
+		apiError(w, http.StatusNotFound, "tunnel manager not available")
+		return
+	}
+	if err := s.tunnel.Delete(r.Context()); err != nil {
+		log.Printf("web: delete tunnel: %v", err)
+		apiError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---- Scan subnets -----------------------------------------------------------

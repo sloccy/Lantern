@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.24-trixie AS builder
 
 # Build-time metadata (injected by CI via --build-arg).
 ARG BUILD_VERSION=dev
@@ -32,17 +32,24 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 #   cap_net_raw          — raw sockets for ARP pre-sweep (faster network scanning)
 # File capabilities are preserved by COPY into the final image.
 RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends libcap2-bin && \
+    apt-get install -y --no-install-recommends libcap2-bin curl && \
     setcap 'cap_net_bind_service=+ep cap_net_raw=+ep' /build/lantern
 
+# Download cloudflared for tunnel management.
+RUN curl -fsSL -o /cloudflared \
+    "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" \
+    && chmod +x /cloudflared
+
 # ── Stage 2: final ────────────────────────────────────────────────────────────
-FROM gcr.io/distroless/static-debian12:nonroot
+# base-debian13 (vs static) adds glibc, required for the dynamically-linked cloudflared binary.
+FROM gcr.io/distroless/base-debian13:nonroot
 
 # CA certificates for outbound HTTPS (ipify, Cloudflare, ACME).
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Binary.
 COPY --from=builder /build/lantern /lantern
+COPY --from=builder /cloudflared /cloudflared
 
 # Pre-create data directory owned by the nonroot user (UID 65532).
 # This ensures Docker initialises the named volume with correct ownership on first run.

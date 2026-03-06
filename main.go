@@ -17,6 +17,7 @@ import (
 	"lantern/internal/discovery"
 	"lantern/internal/proxy"
 	"lantern/internal/store"
+	"lantern/internal/tunnel"
 	"lantern/internal/web"
 )
 
@@ -58,13 +59,18 @@ func main() {
 		log.Fatalf("store: %v", err)
 	}
 
-	// Cloudflare DNS client (no-op when credentials are absent).
-	cfClient, err := cf.New(cfg.CFAPIToken, cfg.CFZoneID)
+	// Cloudflare DNS + tunnel client (no-op when credentials are absent).
+	cfClient, err := cf.New(cfg.CFAPIToken, cfg.CFZoneID, cfg.CFTunnelID, cfg.CFAccountID)
 	if err != nil {
 		log.Fatalf("cloudflare: %v", err)
 	}
 	if cfg.CFAPIToken == "" || cfg.CFZoneID == "" {
 		log.Println("WARNING: CF_API_TOKEN or CF_ZONE_ID not set — DNS management disabled")
+	}
+	if cfClient.TunnelEnabled() {
+		log.Printf("Cloudflare Tunnel mode active: tunnel_id=%s", cfg.CFTunnelID)
+	} else if cfg.CFTunnelID != "" {
+		log.Println("WARNING: CF_TUNNEL_ID set but CF_ACCOUNT_ID missing — tunnel management disabled")
 	}
 
 	// TLS certificate manager.
@@ -87,8 +93,16 @@ func main() {
 	disco := discovery.New(cfg, st, cfClient)
 	webSrv.SetScanner(disco)
 
+	// Cloudflare Tunnel manager (subprocess lifecycle).
+	tunnelMgr := tunnel.New(cfg, st, cfClient)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	if err := tunnelMgr.StartIfConfigured(ctx); err != nil {
+		log.Printf("tunnel: auto-start failed: %v", err)
+	}
+	webSrv.SetTunnelManager(tunnelMgr)
 
 	go disco.DockerWatch(ctx)
 	go disco.ScheduledScan(ctx)
@@ -155,6 +169,7 @@ func main() {
 
 	_ = httpSrv.Shutdown(shutCtx)
 	_ = httpsSrv.Shutdown(shutCtx)
+	tunnelMgr.Stop()
 	_ = st.Save()
 	log.Println("bye")
 }
