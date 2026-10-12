@@ -147,7 +147,8 @@ jobs:
     needs: [lint, build]
     if: always()
     runs-on: ubuntu-latest
-    permissions: {}
+    permissions:
+      pull-requests: write
     steps:
       - name: Verify required jobs succeeded
         run: |
@@ -155,6 +156,21 @@ jobs:
             echo "A required job did not succeed (lint=${{ needs.lint.result }}, build=${{ needs.build.result }})"
             exit 1
           fi
+
+      # The auto-bump PR is opened by github-actions, so its checks failing
+      # wouldn't otherwise email anyone. Assigning the repo owner piggybacks
+      # on GitHub's normal "assigned" notification email — no extra secrets.
+      - name: Flag failed auto-bump PR for attention
+        if: failure() && github.event_name == 'pull_request' && github.head_ref == 'chore/vuln-autofix'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr edit "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --add-assignee sloccy
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "${{ github.repository }}" \
+            --body "Automated checks failed on this govulncheck auto-bump PR — needs manual attention before it can merge."
 
   # Combines per-arch digests into a multi-arch manifest list and pushes all tags.
   publish:
