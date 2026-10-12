@@ -201,7 +201,7 @@ func TestLoadOrCreateUser_LoadsExistingKey(t *testing.T) {
 	if !ok1 || !ok2 {
 		t.Fatal("expected ECDSA private key")
 	}
-	if k1.D.Cmp(k2.D) != 0 {
+	if !k1.Equal(k2) {
 		t.Error("loadOrCreateUser: key changed between loads")
 	}
 }
@@ -229,7 +229,7 @@ func TestSaveAndLoadUser_RoundTrip(t *testing.T) {
 	if !ok1 || !ok2 {
 		t.Fatal("expected ECDSA private key")
 	}
-	if k1.D.Cmp(k2.D) != 0 {
+	if !k1.Equal(k2) {
 		t.Error("key changed after round-trip")
 	}
 }
