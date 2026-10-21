@@ -126,25 +126,28 @@ type upgradeFallbackTransport struct {
 
 func (t *upgradeFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := insecureTransport.RoundTrip(req)
-	if err != nil || resp.StatusCode == http.StatusSwitchingProtocols {
+	if err != nil || resp.StatusCode == http.StatusSwitchingProtocols ||
+		!strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
 		return resp, err
 	}
 	info, _ := req.Context().Value(hostModeCtxKey{}).(hostModeInfo)
-	if !info.auto || info.mode != hostClient || !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
-		return resp, err
-	}
-	retry := req.Clone(req.Context())
-	retry.Host = t.target.Host
-	backendOrigin(retry.Header, req.Host, t.target)
-	resp2, err2 := insecureTransport.RoundTrip(retry)
-	if err2 != nil || resp2.StatusCode != http.StatusSwitchingProtocols {
+	if info.auto && info.mode == hostClient {
+		retry := req.Clone(req.Context())
+		retry.Host = t.target.Host
+		backendOrigin(retry.Header, req.Host, t.target)
+		resp2, err2 := insecureTransport.RoundTrip(retry)
+		if err2 == nil && resp2.StatusCode == http.StatusSwitchingProtocols {
+			_ = resp.Body.Close()
+			t.h.setHostMode(t.sub, info.targetStr, hostBackend)
+			log.Printf("proxy: %s host mode = backend (WebSocket upgrade refused with public Host)", t.sub) //nolint:gosec // sub is a store-validated subdomain
+			return resp2, nil
+		}
 		if err2 == nil {
 			_ = resp2.Body.Close()
 		}
-		return resp, nil
 	}
-	_ = resp.Body.Close()
-	t.h.setHostMode(t.sub, info.targetStr, hostBackend)
-	log.Printf("proxy: %s host mode = backend (WebSocket upgrade refused with public Host)", t.sub) //nolint:gosec // sub is a store-validated subdomain
-	return resp2, nil
+	// Refused upgrade: say why, since the browser only reports "connection refused".
+	log.Printf("proxy: %s WebSocket upgrade refused by backend: status %d (host mode %q, Host %q, Origin %q)", //nolint:gosec // values are request headers logged for diagnosis
+		t.sub, resp.StatusCode, info.mode, req.Host, req.Header.Get("Origin"))
+	return resp, nil
 }
