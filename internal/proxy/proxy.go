@@ -131,7 +131,7 @@ func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub str
 // carried in the request context.
 func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
-		Transport:  insecureTransport,
+		Transport:  &upgradeFallbackTransport{h: h, sub: sub, target: target},
 		BufferPool: &proxyBufPool,
 	}
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
@@ -149,11 +149,7 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 		if info.mode == hostBackend {
 			// Backend sees its own host; make a matching browser Origin
 			// (WebSocket upgrades, CSRF checks) consistent with it.
-			if o := pr.Out.Header.Get("Origin"); o != "" {
-				if ou, err := url.Parse(o); err == nil && ou.Host == pr.In.Host {
-					pr.Out.Header.Set("Origin", target.Scheme+"://"+target.Host)
-				}
-			}
+			backendOrigin(pr.Out.Header, pr.In.Host, target)
 		} else {
 			pr.Out.Host = pr.In.Host
 		}

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,4 +100,51 @@ func probeStatus(ctx context.Context, target *url.URL, host string) (int, error)
 	}
 	_ = resp.Body.Close()
 	return resp.StatusCode, nil
+}
+
+// backendOrigin rewrites a browser Origin that names the public host to the
+// backend's own origin, so backends that compare Origin to Host accept it.
+func backendOrigin(hdr http.Header, publicHost string, target *url.URL) {
+	o := hdr.Get("Origin")
+	if o == "" {
+		return
+	}
+	if ou, err := url.Parse(o); err == nil && ou.Host == publicHost {
+		hdr.Set("Origin", target.Scheme+"://"+target.Host)
+	}
+}
+
+// upgradeFallbackTransport retries a refused WebSocket upgrade once with the
+// backend's own Host. Some backends accept the public Host for normal pages
+// (so the "/" probe picks client mode) but reject it on upgrades. When the
+// retry succeeds the service switches to backend mode for good.
+type upgradeFallbackTransport struct {
+	h      *Handler
+	sub    string
+	target *url.URL
+}
+
+func (t *upgradeFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := insecureTransport.RoundTrip(req)
+	if err != nil || resp.StatusCode == http.StatusSwitchingProtocols {
+		return resp, err
+	}
+	info, _ := req.Context().Value(hostModeCtxKey{}).(hostModeInfo)
+	if !info.auto || info.mode != hostClient || !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+		return resp, err
+	}
+	retry := req.Clone(req.Context())
+	retry.Host = t.target.Host
+	backendOrigin(retry.Header, req.Host, t.target)
+	resp2, err2 := insecureTransport.RoundTrip(retry)
+	if err2 != nil || resp2.StatusCode != http.StatusSwitchingProtocols {
+		if err2 == nil {
+			_ = resp2.Body.Close()
+		}
+		return resp, nil
+	}
+	_ = resp.Body.Close()
+	t.h.setHostMode(t.sub, info.targetStr, hostBackend)
+	log.Printf("proxy: %s host mode = backend (WebSocket upgrade refused with public Host)", t.sub) //nolint:gosec // sub is a store-validated subdomain
+	return resp2, nil
 }

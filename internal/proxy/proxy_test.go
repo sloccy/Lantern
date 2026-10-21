@@ -404,3 +404,63 @@ func testWebSocketOrigin(t *testing.T, hostMode string) {
 		t.Errorf("status: got %d, want 101", resp.StatusCode)
 	}
 }
+
+// A backend that serves pages for any Host but only accepts WebSocket upgrades
+// addressed to its own host (the UniFi pattern) must still end up connected.
+func TestHostMode_WebSocketFallsBackToBackend(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Upgrade") == "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Host != strings.TrimPrefix(srv.URL, "http://") {
+			http.Error(w, "bad host", http.StatusForbidden)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, buf, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+		_ = buf.Flush()
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	st.AddService(&store.Service{ID: "u1", Name: "U", Subdomain: "ws", Target: srv.URL})
+	h := newTestHandler(t, st, nil)
+	front := httptest.NewServer(h)
+	defer front.Close()
+
+	dial := func() int {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, front.URL+"/api/ws", http.NoBody)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Host = "ws.example.com"
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		return resp.StatusCode
+	}
+	if got := dial(); got != http.StatusSwitchingProtocols {
+		t.Fatalf("first upgrade: status %d, want 101", got)
+	}
+	v, _ := h.hostModes.Load("ws")
+	if e, ok := v.(*hostEntry); !ok || e.mode != hostBackend {
+		t.Errorf("mode after fallback = %+v, want backend", v)
+	}
+	if got := dial(); got != http.StatusSwitchingProtocols {
+		t.Errorf("second upgrade: status %d, want 101", got)
+	}
+}
