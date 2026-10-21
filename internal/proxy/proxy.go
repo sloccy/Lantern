@@ -44,8 +44,9 @@ var proxyBufPool bufferPool
 // proxyEntry caches a reverse proxy along with the target URL string so we can
 // detect when a service's target has changed and rebuild.
 type proxyEntry struct {
-	rp     *httputil.ReverseProxy
-	target string // svc.Target string — used to detect changes
+	rp          *httputil.ReverseProxy
+	target      string // svc.Target string — used to detect changes
+	rewriteHost bool   // svc.RewriteHost — used to detect changes
 }
 
 // Handler is the top-level HTTP handler that routes by subdomain.
@@ -98,13 +99,13 @@ func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub str
 	// Use cached proxy; rebuild only when the service's target URL has changed.
 	var rp *httputil.ReverseProxy
 	if v, ok := h.proxies.Load(sub); ok {
-		if e, ok := v.(*proxyEntry); ok && e.target == svc.Target {
+		if e, ok := v.(*proxyEntry); ok && e.target == svc.Target && e.rewriteHost == svc.RewriteHost {
 			rp = e.rp
 		}
 	}
 	if rp == nil {
-		rp = h.buildProxy(sub, target)
-		h.proxies.Store(sub, &proxyEntry{rp: rp, target: svc.Target})
+		rp = h.buildProxy(sub, target, svc.RewriteHost)
+		h.proxies.Store(sub, &proxyEntry{rp: rp, target: svc.Target, rewriteHost: svc.RewriteHost})
 	}
 	rp.ServeHTTP(w, r)
 }
@@ -112,8 +113,12 @@ func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub str
 // buildProxy constructs a reverse proxy for the given subdomain and target.
 // The returned proxy does not capture the per-request *http.Request; all
 // needed values are derived from the outgoing request clone that the
-// httputil.ReverseProxy passes to Director/ModifyResponse.
-func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy {
+// httputil.ReverseProxy passes to Rewrite/ModifyResponse.
+//
+// By default the client's Host header is passed through, which is what backends
+// need for absolute URLs, cookies and WebSocket Origin checks. With rewriteHost
+// the backend's own host is sent instead, for services that only answer to it.
+func (h *Handler) buildProxy(sub string, target *url.URL, rewriteHost bool) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
 		Transport:  insecureTransport,
 		BufferPool: &proxyBufPool,
@@ -128,8 +133,10 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 		h.errorPage(w, 502, msg)
 	}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
-		pr.SetURL(target)
-		pr.Out.Host = target.Host
+		pr.SetURL(target) // also points Out.Host at the backend
+		if !rewriteHost {
+			pr.Out.Host = pr.In.Host
+		}
 		pr.SetXForwarded()
 		pr.Out.Header.Set("X-Real-IP", realIP(pr.Out))
 		// Preserve upstream X-Forwarded-Proto (e.g. from Cloudflare)
@@ -141,7 +148,7 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 	// Rewrite Location headers that point to the backend host back to the
 	// public-facing URL, preventing redirect loops (e.g. Proxmox VE).
 	// The original incoming host is available via the X-Forwarded-Host header
-	// that Director already set on the outgoing request.
+	// that Rewrite already set on the outgoing request.
 	rp.ModifyResponse = func(resp *http.Response) error {
 		loc := resp.Header.Get("Location")
 		if loc == "" {

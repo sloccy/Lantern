@@ -40,7 +40,8 @@ type Service struct {
 	DNSRecordID   string    `json:"dns_record_id,omitempty"`
 	TunnelRouteID string    `json:"tunnel_route_id,omitempty"` // hostname routed via CF tunnel
 	SkipHealth    bool      `json:"skip_health,omitempty"`
-	DirectOnly    bool      `json:"direct_only,omitempty"` // link directly to target, no subdomain/DNS
+	RewriteHost   bool      `json:"rewrite_host,omitempty"` // send the backend's own host as Host (legacy); default passes the public Host through
+	DirectOnly    bool      `json:"direct_only,omitempty"`  // link directly to target, no subdomain/DNS
 	CreatedAt     time.Time `json:"created_at"`
 }
 
