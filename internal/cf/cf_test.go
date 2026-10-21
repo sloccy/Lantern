@@ -257,3 +257,68 @@ func TestNoopOperations(t *testing.T) {
 		t.Errorf("noop RemoveTunnelRoute: %v", err)
 	}
 }
+
+// ---- UpsertARecord / EnsureCNAME ---------------------------------------------
+
+func TestUpsertARecord_ReturnsIDs(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Query().Get("name") == "exists.example.com":
+			if r.URL.Query().Get("type") != "A" {
+				t.Errorf("type query = %q, want A", r.URL.Query().Get("type"))
+			}
+			_, _ = w.Write(cfOK([]dnsRecord{{ID: "rec1", Content: "1.2.3.4"}}))
+		case r.Method == http.MethodGet:
+			_, _ = w.Write(cfOK([]dnsRecord{}))
+		default:
+			_, _ = w.Write(cfOK(dnsRecord{ID: "new1"}))
+		}
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "", "")
+	if id, err := c.UpsertARecord(context.Background(), "exists.example.com", "1.2.3.4"); err != nil || id != "rec1" {
+		t.Errorf("existing: id=%q err=%v, want rec1", id, err)
+	}
+	if id, err := c.UpsertARecord(context.Background(), "new.example.com", "1.2.3.4"); err != nil || id != "new1" {
+		t.Errorf("missing: id=%q err=%v, want new1", id, err)
+	}
+}
+
+func TestEnsureCNAME(t *testing.T) {
+	var created, patched bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			switch r.URL.Query().Get("name") {
+			case "ok.example.com":
+				_, _ = w.Write(cfOK([]dnsRecord{{ID: "c1", Content: "tid.cfargotunnel.com"}}))
+			case "stale.example.com":
+				_, _ = w.Write(cfOK([]dnsRecord{{ID: "c2", Content: "old.cfargotunnel.com"}}))
+			default:
+				_, _ = w.Write(cfOK([]dnsRecord{}))
+			}
+			return
+		}
+		created = true
+		_, _ = w.Write(cfOK(dnsRecord{ID: "c3"}))
+	})
+	mux.HandleFunc("/zones/zone1/dns_records/c2", func(w http.ResponseWriter, r *http.Request) {
+		patched = true
+		_, _ = w.Write(cfOK(dnsRecord{ID: "c2"}))
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "tid", "acct")
+	ctx := context.Background()
+	if id, err := c.EnsureCNAME(ctx, "ok.example.com"); err != nil || id != "c1" {
+		t.Errorf("ok: id=%q err=%v", id, err)
+	}
+	if id, err := c.EnsureCNAME(ctx, "stale.example.com"); err != nil || id != "c2" || !patched {
+		t.Errorf("stale: id=%q err=%v patched=%v", id, err, patched)
+	}
+	if id, err := c.EnsureCNAME(ctx, "missing.example.com"); err != nil || id != "c3" || !created {
+		t.Errorf("missing: id=%q err=%v created=%v", id, err, created)
+	}
+}

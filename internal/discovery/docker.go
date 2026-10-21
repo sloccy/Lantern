@@ -272,6 +272,9 @@ func (d *Discoverer) addDockerDiscovered(id, name, target, suggestedSub string) 
 		return
 	}
 	ip, port := splitTarget(target)
+	if d.store.IsIgnored(ip, port) {
+		return // user ignored this ip:port; don't resurrect it
+	}
 	disc := &store.DiscoveredService{
 		ID:                 util.NewID(),
 		IP:                 ip,
@@ -376,17 +379,7 @@ func bestPort(ports []container.PortSummary) int {
 }
 
 // splitTarget splits "http://ip:port" into (ip, port).
-func splitTarget(target string) (ip string, port int) {
-	s := strings.TrimPrefix(target, "http://")
-	s = strings.TrimPrefix(s, "https://")
-	s = strings.TrimSuffix(s, "/")
-	idx := strings.LastIndexByte(s, ':')
-	if idx < 0 {
-		return s, 0
-	}
-	port, _ = strconv.Atoi(s[idx+1:])
-	return s[:idx], port
-}
+func splitTarget(target string) (ip string, port int) { return util.SplitTarget(target) }
 
 // ── Port / network helpers ────────────────────────────────────────────────────
 

@@ -23,10 +23,10 @@ type createServiceRequest struct {
 	Subdomain    string
 	Target       string // required if not from discovered
 	Category     string
-	Tunnel       bool // route via CF tunnel instead of A record
-	DirectOnly   bool // no subdomain/DNS; link directly to target
-	SkipHealth   bool // skip health check polling
-	RewriteHost  bool // send the backend's own host as Host instead of the public one
+	Tunnel       bool   // route via CF tunnel instead of A record
+	DirectOnly   bool   // no subdomain/DNS; link directly to target
+	SkipHealth   bool   // skip health check polling
+	HostMode     string // "" = auto, "client", "backend"
 }
 
 func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +47,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 	req.Tunnel = util.ParseFormBool(r.FormValue("tunnel"))
 	req.DirectOnly = util.ParseFormBool(r.FormValue("direct_only"))
 	req.SkipHealth = util.ParseFormBool(r.FormValue("skip_health"))
-	req.RewriteHost = util.ParseFormBool(r.FormValue("rewrite_host"))
+	req.HostMode = cleanHostMode(r.FormValue("host_mode"))
 
 	// Read uploaded icon if provided (stored as a file after the service ID is known).
 	var uploadedIconData []byte
@@ -143,7 +143,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 		ContainerName: containerName,
 		DirectOnly:    req.DirectOnly,
 		SkipHealth:    req.SkipHealth,
-		RewriteHost:   req.RewriteHost,
+		HostMode:      req.HostMode,
 		Order:         maxOrder + 1,
 		CreatedAt:     time.Now(),
 	}
@@ -200,15 +200,15 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateServiceRequest struct {
-	Name        string
-	Subdomain   string
-	Target      string
-	Category    string
-	Icon        *string // nil = keep existing; "" = clear; non-empty = set
-	Tunnel      *bool   // nil = keep existing; true/false = enable/disable
-	SkipHealth  *bool   // nil = keep existing; true/false = skip health check
-	RewriteHost *bool   // nil = keep existing; true/false = send backend host as Host
-	DirectOnly  *bool   // nil = keep existing; true/false = direct link only
+	Name       string
+	Subdomain  string
+	Target     string
+	Category   string
+	Icon       *string // nil = keep existing; "" = clear; non-empty = set
+	Tunnel     *bool   // nil = keep existing; true/false = enable/disable
+	SkipHealth *bool   // nil = keep existing; true/false = skip health check
+	HostMode   *string // nil = keep existing; "" = auto, "client", "backend"
+	DirectOnly *bool   // nil = keep existing; true/false = direct link only
 }
 
 // dnsState captures the DNS/tunnel configuration of a service, used as input and output for reconcileDNS.
@@ -305,7 +305,7 @@ func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, t
 
 	case dnsCreateA:
 		if s.cfg.ServerIP != "" {
-			id, err := s.cf.CreateRecord(ctx, newHostname, s.cfg.ServerIP)
+			id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
 			if err != nil {
 				log.Printf("web: create DNS %s: %v", want.Subdomain, err)
 			} else {
@@ -331,7 +331,7 @@ func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, t
 			}
 		}
 		if s.cfg.ServerIP != "" {
-			id, err := s.cf.CreateRecord(ctx, newHostname, s.cfg.ServerIP)
+			id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
 			if err != nil {
 				log.Printf("web: create DNS %s: %v", want.Subdomain, err)
 			} else {
@@ -369,7 +369,7 @@ func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, t
 			log.Printf("web: remove tunnel route %s: %v", old.Subdomain, err)
 		}
 		if s.cfg.ServerIP != "" {
-			id, err := s.cf.CreateRecord(ctx, newHostname, s.cfg.ServerIP)
+			id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
 			if err != nil {
 				log.Printf("web: create DNS %s: %v", want.Subdomain, err)
 			} else {
@@ -424,10 +424,10 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 		v := util.ParseFormBool(r.FormValue("skip_health"))
 		req.SkipHealth = &v
 	}
-	// rewrite_host checkbox: only meaningful when the form includes a rewrite_host_present hidden field
-	if r.FormValue("rewrite_host_present") == "1" {
-		v := util.ParseFormBool(r.FormValue("rewrite_host"))
-		req.RewriteHost = &v
+	// host_mode select: only meaningful when the form includes a host_mode_present hidden field
+	if r.FormValue("host_mode_present") == "1" {
+		v := cleanHostMode(r.FormValue("host_mode"))
+		req.HostMode = &v
 	}
 	// direct_only checkbox: only meaningful when the form includes a direct_only_present hidden field
 	if r.FormValue("direct_only_present") == "1" {
@@ -447,9 +447,9 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 	if req.SkipHealth != nil {
 		skipHealth = *req.SkipHealth
 	}
-	rewriteHost := svc.RewriteHost
-	if req.RewriteHost != nil {
-		rewriteHost = *req.RewriteHost
+	hostMode := svc.HostMode
+	if req.HostMode != nil {
+		hostMode = *req.HostMode
 	}
 	directOnly := svc.DirectOnly
 	if req.DirectOnly != nil {
@@ -487,7 +487,7 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 		ContainerID:   svc.ContainerID,
 		ContainerName: svc.ContainerName,
 		SkipHealth:    skipHealth,
-		RewriteHost:   rewriteHost,
+		HostMode:      hostMode,
 		DirectOnly:    directOnly,
 		CreatedAt:     svc.CreatedAt,
 	}
@@ -536,17 +536,22 @@ func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
 			log.Printf("web: delete DNS record: %v", err)
 		}
 	}
-	if svc.Source == store.SourceDocker && svc.ContainerID != "" {
-		s.store.AddDiscovered(&store.DiscoveredService{
-			ID:            util.NewID(),
-			IP:            "",
-			Port:          0,
-			Title:         svc.Name,
-			Source:        store.SourceDocker,
-			ContainerID:   svc.ContainerID,
-			ContainerName: svc.ContainerName,
-			DiscoveredAt:  time.Now(),
-		})
+	if svc.Source == store.SourceDocker {
+		// Send the container back to Discovered so it can be re-assigned.
+		ip, port := util.SplitTarget(svc.Target)
+		if !s.store.IsIgnored(ip, port) {
+			s.store.AddDiscovered(&store.DiscoveredService{
+				ID:                 util.NewID(),
+				IP:                 ip,
+				Port:               port,
+				Title:              svc.Name,
+				Source:             store.SourceDocker,
+				ContainerID:        svc.ContainerID,
+				ContainerName:      svc.ContainerName,
+				SuggestedSubdomain: svc.Subdomain,
+				DiscoveredAt:       time.Now(),
+			})
+		}
 		w.Header().Set("Hx-Trigger", `{"refreshDiscovered":null}`)
 	}
 	s.store.DeleteIcon(id)
@@ -623,4 +628,13 @@ func (s *Server) applyServiceIcon(w http.ResponseWriter, svc *store.Service, ico
 	s.store.UpdateService(svc.ID, &updated)
 	s.save()
 	renderTemplate(w, "icon-preview.html", &updated)
+}
+
+// cleanHostMode normalises the Host-header mode form value ("" = auto).
+func cleanHostMode(v string) string {
+	switch v {
+	case "client", "backend":
+		return v
+	}
+	return ""
 }

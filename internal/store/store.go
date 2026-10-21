@@ -40,8 +40,8 @@ type Service struct {
 	DNSRecordID   string    `json:"dns_record_id,omitempty"`
 	TunnelRouteID string    `json:"tunnel_route_id,omitempty"` // hostname routed via CF tunnel
 	SkipHealth    bool      `json:"skip_health,omitempty"`
-	RewriteHost   bool      `json:"rewrite_host,omitempty"` // send the backend's own host as Host (legacy); default passes the public Host through
-	DirectOnly    bool      `json:"direct_only,omitempty"`  // link directly to target, no subdomain/DNS
+	HostMode      string    `json:"host_mode,omitempty"`   // "" = auto, "client" = pass public Host, "backend" = send target's Host
+	DirectOnly    bool      `json:"direct_only,omitempty"` // link directly to target, no subdomain/DNS
 	CreatedAt     time.Time `json:"created_at"`
 }
 
@@ -62,6 +62,9 @@ type IgnoredService struct {
 	Port      int       `json:"port"`
 	Title     string    `json:"title,omitempty"`
 	IgnoredAt time.Time `json:"ignored_at"`
+	// Source and ContainerName let an un-ignored docker entry return as docker.
+	Source        string `json:"source,omitempty"`
+	ContainerName string `json:"container_name,omitempty"`
 }
 
 // DiscoveredService is a network/docker service not yet assigned a subdomain.
@@ -401,6 +404,15 @@ func (s *Store) ClearContainerID(cid string) {
 	}
 }
 
+// SetDNSRecordID records the Cloudflare record ID for a service.
+func (s *Store) SetDNSRecordID(id, recordID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if svc := s.idIdx[id]; svc != nil {
+		svc.DNSRecordID = recordID
+	}
+}
+
 func (s *Store) AddService(svc *Service) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -593,6 +605,9 @@ func (s *Store) IgnoreDiscovered(id string) error {
 		Port:      found.Port,
 		Title:     found.Title,
 		IgnoredAt: time.Now(),
+
+		Source:        found.Source,
+		ContainerName: found.ContainerName,
 	}
 	s.d.Ignored = append(s.d.Ignored, ig)
 	s.indexIgnored(ig)

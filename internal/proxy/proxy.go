@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"html"
@@ -44,9 +45,16 @@ var proxyBufPool bufferPool
 // proxyEntry caches a reverse proxy along with the target URL string so we can
 // detect when a service's target has changed and rebuild.
 type proxyEntry struct {
-	rp          *httputil.ReverseProxy
-	target      string // svc.Target string — used to detect changes
-	rewriteHost bool   // svc.RewriteHost — used to detect changes
+	rp     *httputil.ReverseProxy
+	target string // svc.Target string — used to detect changes
+}
+
+// hostModeInfo travels in the request context from proxySubdomain to the
+// reverse proxy's Rewrite/ModifyResponse hooks.
+type hostModeInfo struct {
+	mode      string
+	auto      bool   // mode came from auto-detection (not an explicit setting)
+	targetStr string // svc.Target, used as the auto-detect cache key
 }
 
 // Handler is the top-level HTTP handler that routes by subdomain.
@@ -55,6 +63,7 @@ type Handler struct {
 	store       *store.Store
 	webHandler  http.Handler
 	proxies     sync.Map // subdomain → *proxyEntry
+	hostModes   sync.Map // subdomain → *hostEntry (auto-detected Host mode)
 	suffix      string   // ".domain.tld" — pre-computed from cfg.Domain
 	lanternHost string   // "lantern.domain.tld" — pre-computed from cfg.Domain
 }
@@ -86,7 +95,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub string) {
 	svc := h.store.GetServiceBySubdomain(sub)
 	if svc == nil {
-		h.proxies.Delete(sub) // evict stale cache entry if service was deleted
+		h.proxies.Delete(sub) // evict stale cache entries if service was deleted
+		h.hostModes.Delete(sub)
 		h.errorPage(w, 404, fmt.Sprintf("No service assigned to <strong>%s.%s</strong>", html.EscapeString(sub), html.EscapeString(h.cfg.Domain)))
 		return
 	}
@@ -99,15 +109,17 @@ func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub str
 	// Use cached proxy; rebuild only when the service's target URL has changed.
 	var rp *httputil.ReverseProxy
 	if v, ok := h.proxies.Load(sub); ok {
-		if e, ok := v.(*proxyEntry); ok && e.target == svc.Target && e.rewriteHost == svc.RewriteHost {
+		if e, ok := v.(*proxyEntry); ok && e.target == svc.Target {
 			rp = e.rp
 		}
 	}
 	if rp == nil {
-		rp = h.buildProxy(sub, target, svc.RewriteHost)
-		h.proxies.Store(sub, &proxyEntry{rp: rp, target: svc.Target, rewriteHost: svc.RewriteHost})
+		rp = h.buildProxy(sub, target)
+		h.proxies.Store(sub, &proxyEntry{rp: rp, target: svc.Target})
 	}
-	rp.ServeHTTP(w, r)
+	mode := h.hostModeFor(r.Context(), sub, svc.Target, target, svc.HostMode, r.Host)
+	ctx := context.WithValue(r.Context(), hostModeCtxKey{}, hostModeInfo{mode: mode, auto: svc.HostMode == "", targetStr: svc.Target})
+	rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // buildProxy constructs a reverse proxy for the given subdomain and target.
@@ -115,10 +127,9 @@ func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub str
 // needed values are derived from the outgoing request clone that the
 // httputil.ReverseProxy passes to Rewrite/ModifyResponse.
 //
-// By default the client's Host header is passed through, which is what backends
-// need for absolute URLs, cookies and WebSocket Origin checks. With rewriteHost
-// the backend's own host is sent instead, for services that only answer to it.
-func (h *Handler) buildProxy(sub string, target *url.URL, rewriteHost bool) *httputil.ReverseProxy {
+// The Host mode (client or backend) is chosen per request by proxySubdomain and
+// carried in the request context.
+func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy {
 	rp := &httputil.ReverseProxy{
 		Transport:  insecureTransport,
 		BufferPool: &proxyBufPool,
@@ -134,7 +145,16 @@ func (h *Handler) buildProxy(sub string, target *url.URL, rewriteHost bool) *htt
 	}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
 		pr.SetURL(target) // also points Out.Host at the backend
-		if !rewriteHost {
+		info, _ := pr.In.Context().Value(hostModeCtxKey{}).(hostModeInfo)
+		if info.mode == hostBackend {
+			// Backend sees its own host; make a matching browser Origin
+			// (WebSocket upgrades, CSRF checks) consistent with it.
+			if o := pr.Out.Header.Get("Origin"); o != "" {
+				if ou, err := url.Parse(o); err == nil && ou.Host == pr.In.Host {
+					pr.Out.Header.Set("Origin", target.Scheme+"://"+target.Host)
+				}
+			}
+		} else {
 			pr.Out.Host = pr.In.Host
 		}
 		pr.SetXForwarded()
@@ -145,11 +165,16 @@ func (h *Handler) buildProxy(sub string, target *url.URL, rewriteHost bool) *htt
 			pr.Out.Header.Set("X-Forwarded-Proto", proto)
 		}
 	}
-	// Rewrite Location headers that point to the backend host back to the
-	// public-facing URL, preventing redirect loops (e.g. Proxmox VE).
-	// The original incoming host is available via the X-Forwarded-Host header
-	// that Rewrite already set on the outgoing request.
+	// Keep Location headers on the public site: a redirect to the backend's own
+	// host (e.g. Proxmox VE) goes back to the public host, and a plain-http
+	// redirect to the public host is upgraded when the client used HTTPS.
+	// The incoming host/proto are on the outgoing request via X-Forwarded-*.
 	rp.ModifyResponse = func(resp *http.Response) error {
+		info, _ := resp.Request.Context().Value(hostModeCtxKey{}).(hostModeInfo)
+		// Safety net: a backend answering 421 to the public Host needs its own.
+		if info.auto && info.mode == hostClient && resp.StatusCode == http.StatusMisdirectedRequest {
+			h.setHostMode(sub, info.targetStr, hostBackend)
+		}
 		loc := resp.Header.Get("Location")
 		if loc == "" {
 			return nil
@@ -158,9 +183,15 @@ func (h *Handler) buildProxy(sub string, target *url.URL, rewriteHost bool) *htt
 		if err != nil {
 			return nil //nolint:nilerr // unparseable Location header: skip rewrite, don't fail the response
 		}
-		if locURL.Host == target.Host {
+		fwdHost := resp.Request.Header.Get("X-Forwarded-Host")
+		switch {
+		case locURL.Host == target.Host && fwdHost != "":
 			locURL.Scheme = "https"
-			locURL.Host = resp.Request.Header.Get("X-Forwarded-Host")
+			locURL.Host = fwdHost
+			resp.Header.Set("Location", locURL.String())
+		case fwdHost != "" && locURL.Host == fwdHost && locURL.Scheme == "http" &&
+			resp.Request.Header.Get("X-Forwarded-Proto") == "https":
+			locURL.Scheme = "https"
 			resp.Header.Set("Location", locURL.String())
 		}
 		return nil

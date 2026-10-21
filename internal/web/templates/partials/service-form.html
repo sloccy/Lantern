@@ -74,7 +74,7 @@
     {{if .Service}}
     <input type="hidden" name="tunnel_present" value="1">
     <input type="hidden" name="skip_health_present" value="1">
-    <input type="hidden" name="rewrite_host_present" value="1">
+    <input type="hidden" name="host_mode_present" value="1">
     {{end}}
     <div class="d-flex flex-wrap gap-3 mb-3 align-items-center">
       <label class="d-flex gap-2 align-items-center">
@@ -91,9 +91,13 @@
         <input type="checkbox" id="cb-skip-health" name="skip_health" {{if and .Service .Service.SkipHealth}}checked{{end}}>
         Skip health check
       </label>
-      <label class="d-flex gap-2 align-items-center" title="Send the backend's own address as the Host header. Enable only if this service breaks behind Lantern.">
-        <input type="checkbox" id="cb-rewrite-host" name="rewrite_host" {{if and .Service .Service.RewriteHost}}checked{{end}}>
-        Rewrite Host
+      <label class="d-flex gap-2 align-items-center" title="Which Host header the backend receives. Auto picks what works.">
+        Host header
+        <select name="host_mode" class="form-select form-select-sm w-auto">
+          <option value="">Auto</option>
+          <option value="client"{{if and .Service (eq .Service.HostMode "client")}} selected{{end}}>Client</option>
+          <option value="backend"{{if and .Service (eq .Service.HostMode "backend")}} selected{{end}}>Backend</option>
+        </select>
       </label>
     </div>
   </div>

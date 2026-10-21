@@ -44,9 +44,13 @@
         <input type="checkbox" id="cb-skip-health" name="skip_health">
         Skip health check
       </label>
-      <label class="d-flex gap-2 align-items-center" title="Send the backend's own address as the Host header. Enable only if this service breaks behind Lantern.">
-        <input type="checkbox" id="cb-rewrite-host" name="rewrite_host">
-        Rewrite Host
+      <label class="d-flex gap-2 align-items-center" title="Which Host header the backend receives. Auto picks what works.">
+        Host header
+        <select name="host_mode" class="form-select form-select-sm w-auto">
+          <option value="">Auto</option>
+          <option value="client">Client</option>
+          <option value="backend">Backend</option>
+        </select>
       </label>
     </div>
   </div>

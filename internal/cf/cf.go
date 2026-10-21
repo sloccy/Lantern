@@ -85,11 +85,16 @@ func (c *Client) DeleteRecord(ctx context.Context, recordID string) error {
 	return nil
 }
 
+// FindRecord looks up the A record for name and returns its ID and content.
 func (c *Client) FindRecord(ctx context.Context, name string) (recordID, ip string, err error) {
+	return c.findRecord(ctx, name, "A")
+}
+
+func (c *Client) findRecord(ctx context.Context, name, recType string) (recordID, content string, err error) {
 	if c.noop {
 		return "", "", nil
 	}
-	path := "zones/" + c.zoneID + "/dns_records?name=" + url.QueryEscape(name)
+	path := "zones/" + c.zoneID + "/dns_records?type=" + recType + "&name=" + url.QueryEscape(name)
 	result, err := c.api.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("find DNS record %s: %w", name, err)
@@ -104,24 +109,60 @@ func (c *Client) FindRecord(ctx context.Context, name string) (recordID, ip stri
 	return recs[0].ID, recs[0].Content, nil
 }
 
-// EnsureARecord makes sure an unproxied A record for name → ip exists.
-// Creates it if missing, updates the content if changed, no-ops if already correct.
-func (c *Client) EnsureARecord(ctx context.Context, name, ip string) error {
+// UpsertARecord makes sure an unproxied A record for name → ip exists and
+// returns its ID. Creates it if missing, updates the content if changed, and
+// leaves it alone if already correct. Safe to call when the record already exists.
+func (c *Client) UpsertARecord(ctx context.Context, name, ip string) (string, error) {
 	if c.noop {
-		return nil
+		return "", nil
 	}
 	recordID, current, err := c.FindRecord(ctx, name)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if recordID == "" {
-		_, err := c.CreateRecord(ctx, name, ip)
-		return err
+		return c.CreateRecord(ctx, name, ip)
 	}
 	if current == ip {
-		return nil
+		return recordID, nil
 	}
-	return c.UpdateRecord(ctx, recordID, ip)
+	if err := c.UpdateRecord(ctx, recordID, ip); err != nil {
+		return "", err
+	}
+	return recordID, nil
+}
+
+// EnsureARecord is UpsertARecord without the record ID.
+func (c *Client) EnsureARecord(ctx context.Context, name, ip string) error {
+	_, err := c.UpsertARecord(ctx, name, ip)
+	return err
+}
+
+// EnsureCNAME makes sure the proxied tunnel CNAME for hostname exists and points
+// at the tunnel, and returns its ID.
+func (c *Client) EnsureCNAME(ctx context.Context, hostname string) (string, error) {
+	if c.noop || c.zoneID == "" || c.tunnelID == "" {
+		return "", nil
+	}
+	want := c.tunnelID + ".cfargotunnel.com"
+	recordID, current, err := c.findRecord(ctx, hostname, "CNAME")
+	if err != nil {
+		return "", err
+	}
+	if recordID == "" {
+		return c.createCNAME(ctx, hostname)
+	}
+	if current == want {
+		return recordID, nil
+	}
+	_, err = c.api.do(ctx, http.MethodPatch,
+		"zones/"+c.zoneID+"/dns_records/"+recordID,
+		map[string]any{"content": want, "proxied": true},
+	)
+	if err != nil {
+		return "", fmt.Errorf("update CNAME %s: %w", hostname, err)
+	}
+	return recordID, nil
 }
 
 // createDNSRecord posts params to the DNS records endpoint and returns the new record ID.

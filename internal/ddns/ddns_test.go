@@ -2,6 +2,7 @@ package ddns
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -151,5 +152,103 @@ func TestCheckAndUpdate_NoDomains(t *testing.T) {
 
 	if called {
 		t.Error("expected ipify not to be called when no DDNS domains registered")
+	}
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// cfMock serves a minimal Cloudflare DNS API; failPatch makes record updates fail.
+func cfMock(t *testing.T, records map[string]string, failPatch *bool) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			name := r.URL.Query().Get("name")
+			if ip, ok := records[name]; ok {
+				writeJSON(w, map[string]any{"success": true, "result": []map[string]string{{"id": "id-" + name, "content": ip}}})
+				return
+			}
+			writeJSON(w, map[string]any{"success": true, "result": []string{}})
+			return
+		}
+		var body struct {
+			Name    string `json:"name"`
+			Content string `json:"content"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		records[body.Name] = body.Content
+		writeJSON(w, map[string]any{"success": true, "result": map[string]string{"id": "id-" + body.Name}})
+	})
+	mux.HandleFunc("/zones/zone1/dns_records/", func(w http.ResponseWriter, r *http.Request) {
+		if failPatch != nil && *failPatch {
+			_, _ = fmt.Fprint(w, `{"success":false,"errors":[{"message":"boom"}]}`)
+			return
+		}
+		name := r.URL.Path[len("/zones/zone1/dns_records/id-"):]
+		var body struct {
+			Content string `json:"content"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		records[name] = body.Content
+		writeJSON(w, map[string]any{"success": true, "result": map[string]string{"id": "id-" + name}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	cf.SetBaseURLForTest(t, srv.URL)
+}
+
+func TestCheckAndUpdate_RetriesAfterFailure(t *testing.T) {
+	ip := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprint(w, "9.9.9.9") }))
+	defer ip.Close()
+	orig := ipifyURL
+	ipifyURL = ip.URL
+	defer func() { ipifyURL = orig }()
+
+	records := map[string]string{"home.example.com": "1.1.1.1"}
+	fail := true
+	cfMock(t, records, &fail)
+
+	st := newTestStore(t)
+	st.AddDDNSDomain("home.example.com")
+	c, _ := cf.New("tok", "zone1", "", "")
+	m := New(&config.Config{}, st, c)
+
+	m.checkAndUpdate(context.Background())
+	if st.GetPublicIP() == "9.9.9.9" {
+		t.Fatal("public IP stored despite failed update; it would never be retried")
+	}
+	fail = false
+	m.checkAndUpdate(context.Background())
+	if records["home.example.com"] != "9.9.9.9" || st.GetPublicIP() != "9.9.9.9" {
+		t.Errorf("retry did not fix record: records=%v stored=%q", records, st.GetPublicIP())
+	}
+}
+
+func TestSyncServices_RepairsAndStoresIDs(t *testing.T) {
+	records := map[string]string{"stale.example.com": "1.1.1.1"} // wrong IP; others missing
+	cfMock(t, records, nil)
+
+	st := newTestStore(t)
+	st.AddService(&store.Service{ID: "a", Subdomain: "stale", Target: "http://x:1"})
+	st.AddService(&store.Service{ID: "b", Subdomain: "gone", Target: "http://x:2"})
+	st.AddService(&store.Service{ID: "c", Subdomain: "direct", Target: "http://x:3", DirectOnly: true})
+
+	c, _ := cf.New("tok", "zone1", "", "")
+	m := New(&config.Config{Domain: "example.com", ServerIP: "10.0.0.1"}, st, c)
+	m.SyncServices(context.Background())
+
+	for _, name := range []string{"stale", "gone", "lantern"} {
+		if got := records[name+".example.com"]; got != "10.0.0.1" {
+			t.Errorf("%s record = %q, want 10.0.0.1", name, got)
+		}
+	}
+	if _, ok := records["direct.example.com"]; ok {
+		t.Error("direct-only service must not get a DNS record")
+	}
+	if got := st.GetServiceByID("b").DNSRecordID; got != "id-gone.example.com" {
+		t.Errorf("stored DNSRecordID = %q", got)
 	}
 }

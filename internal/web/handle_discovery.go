@@ -107,13 +107,18 @@ func (s *Server) unignoreService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Re-add as a discovered service so it appears in the Discovered section.
+	source := ig.Source
+	if source == "" {
+		source = store.SourceNetwork
+	}
 	s.store.AddDiscovered(&store.DiscoveredService{
-		ID:           ig.ID,
-		IP:           ig.IP,
-		Port:         ig.Port,
-		Title:        ig.Title,
-		Source:       store.SourceNetwork,
-		DiscoveredAt: time.Now(),
+		ID:            ig.ID,
+		IP:            ig.IP,
+		Port:          ig.Port,
+		Title:         ig.Title,
+		Source:        source,
+		ContainerName: ig.ContainerName,
+		DiscoveredAt:  time.Now(),
 	})
 	s.save()
 	w.Header().Set("Hx-Trigger", `{"refreshDiscovered":null}`)

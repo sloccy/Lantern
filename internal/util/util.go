@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 
 	"lantern/internal/store"
@@ -72,4 +73,17 @@ func SortDiscoveredByIP(svcs []*store.DiscoveredService) {
 		}
 		return svcs[i].Port < svcs[j].Port
 	})
+}
+
+// SplitTarget splits "http://ip:port" into (ip, port). Port is 0 when absent.
+func SplitTarget(target string) (ip string, port int) {
+	s := strings.TrimPrefix(target, "http://")
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimSuffix(s, "/")
+	idx := strings.LastIndexByte(s, ':')
+	if idx < 0 {
+		return s, 0
+	}
+	port, _ = strconv.Atoi(s[idx+1:])
+	return s[:idx], port
 }

@@ -116,11 +116,11 @@ func TestServeHTTP_LocationRewrite(t *testing.T) {
 
 	st := newTestStore(t)
 	st.AddService(&store.Service{
-		ID:          "svc2",
-		Name:        "Redirect",
-		Subdomain:   "redir",
-		Target:      backend.URL,
-		RewriteHost: true, // the backend then sees (and redirects to) its own address
+		ID:        "svc2",
+		Name:      "Redirect",
+		Subdomain: "redir",
+		Target:    backend.URL,
+		HostMode:  "backend", // the backend then sees (and redirects to) its own address
 	})
 
 	h := newTestHandler(t, st, nil)
@@ -219,22 +219,26 @@ func hostEcho(t *testing.T) *httptest.Server {
 	return srv
 }
 
-func serveOnce(t *testing.T, h *Handler, host string) *httptest.ResponseRecorder {
+func serveOnce(t *testing.T, h *Handler) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
-	req.Host = host
+	req.Host = "test.example.com"
 	h.ServeHTTP(rec, req)
 	return rec
 }
 
-func TestServeHTTP_PreservesHost(t *testing.T) {
+func addSvc(st *store.Store, backendURL, hostMode string) {
+	st.AddService(&store.Service{ID: "s1", Name: "S", Subdomain: "test", Target: backendURL, HostMode: hostMode})
+}
+
+func TestHostMode_AutoPassesClientHost(t *testing.T) {
 	backend := hostEcho(t)
 	st := newTestStore(t)
-	st.AddService(&store.Service{ID: "p1", Name: "P", Subdomain: "test", Target: backend.URL})
+	addSvc(st, backend.URL, "")
 	h := newTestHandler(t, st, nil)
 
-	rec := serveOnce(t, h, "test.example.com")
+	rec := serveOnce(t, h)
 	if got := rec.Header().Get("X-Seen-Host"); got != "test.example.com" {
 		t.Errorf("backend Host: got %q, want test.example.com", got)
 	}
@@ -243,62 +247,120 @@ func TestServeHTTP_PreservesHost(t *testing.T) {
 	}
 }
 
-func TestServeHTTP_RewriteHost(t *testing.T) {
-	backend := hostEcho(t)
-	st := newTestStore(t)
-	st.AddService(&store.Service{ID: "r1", Name: "R", Subdomain: "test", Target: backend.URL, RewriteHost: true})
-	h := newTestHandler(t, st, nil)
+// strictHostBackend rejects any Host other than its own, like Django ALLOWED_HOSTS.
+func strictHostBackend(t *testing.T, status int) *httptest.Server {
+	t.Helper()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != strings.TrimPrefix(srv.URL, "http://") {
+			http.Error(w, "bad host", status)
+			return
+		}
+		w.Header().Set("X-Seen-Host", r.Host)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
 
-	rec := serveOnce(t, h, "test.example.com")
-	want := strings.TrimPrefix(backend.URL, "http://")
-	if got := rec.Header().Get("X-Seen-Host"); got != want {
-		t.Errorf("backend Host: got %q, want %q", got, want)
-	}
-	if got := rec.Header().Get("X-Seen-Forwarded-Host"); got != "test.example.com" {
-		t.Errorf("X-Forwarded-Host: got %q, want test.example.com", got)
+func TestHostMode_AutoFallsBackToBackendHost(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusForbidden, http.StatusMisdirectedRequest} {
+		backend := strictHostBackend(t, status)
+		st := newTestStore(t)
+		addSvc(st, backend.URL, "")
+		h := newTestHandler(t, st, nil)
+
+		rec := serveOnce(t, h)
+		if rec.Code != http.StatusOK {
+			t.Errorf("status %d: proxied code %d, want 200", status, rec.Code)
+		}
+		want := strings.TrimPrefix(backend.URL, "http://")
+		if got := rec.Header().Get("X-Seen-Host"); got != want {
+			t.Errorf("status %d: backend Host %q, want %q", status, got, want)
+		}
 	}
 }
 
-func TestServeHTTP_RewriteHostToggleRebuildsProxy(t *testing.T) {
-	backend := hostEcho(t)
+func TestHostMode_AutoKeepsClientWhenBothRejected(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "nope", http.StatusForbidden)
+	}))
+	t.Cleanup(backend.Close)
 	st := newTestStore(t)
-	svc := &store.Service{ID: "t1", Name: "T", Subdomain: "test", Target: backend.URL}
-	st.AddService(svc)
+	addSvc(st, backend.URL, "")
 	h := newTestHandler(t, st, nil)
 
-	if got := serveOnce(t, h, "test.example.com").Header().Get("X-Seen-Host"); got != "test.example.com" {
-		t.Fatalf("before toggle: backend Host %q, want test.example.com", got)
-	}
-
-	updated := *svc
-	updated.RewriteHost = true
-	st.UpdateService(svc.ID, &updated)
-
-	want := strings.TrimPrefix(backend.URL, "http://")
-	if got := serveOnce(t, h, "test.example.com").Header().Get("X-Seen-Host"); got != want {
-		t.Errorf("after toggle: backend Host %q, want %q", got, want)
+	serveOnce(t, h)
+	v, _ := h.hostModes.Load("test")
+	if e, ok := v.(*hostEntry); !ok || e.mode != hostClient {
+		t.Errorf("mode = %+v, want client", v)
 	}
 }
 
-func TestServeHTTP_LocationPreservedHost(t *testing.T) {
+func TestHostMode_ExplicitOverrides(t *testing.T) {
+	backend := hostEcho(t)
+	own := strings.TrimPrefix(backend.URL, "http://")
+
+	st := newTestStore(t)
+	addSvc(st, backend.URL, "backend")
+	h := newTestHandler(t, st, nil)
+	if got := serveOnce(t, h).Header().Get("X-Seen-Host"); got != own {
+		t.Errorf("backend mode: Host %q, want %q", got, own)
+	}
+
+	// Strict backend would trigger auto fallback; explicit client must not.
+	strict := strictHostBackend(t, http.StatusBadRequest)
+	st2 := newTestStore(t)
+	addSvc(st2, strict.URL, "client")
+	h2 := newTestHandler(t, st2, nil)
+	if code := serveOnce(t, h2).Code; code != http.StatusBadRequest {
+		t.Errorf("client mode: code %d, want 400", code)
+	}
+}
+
+func TestHostMode_TargetChangeRedetects(t *testing.T) {
+	strict := strictHostBackend(t, http.StatusBadRequest)
+	plain := hostEcho(t)
+	st := newTestStore(t)
+	addSvc(st, strict.URL, "")
+	h := newTestHandler(t, st, nil)
+	serveOnce(t, h)
+
+	st.UpdateService("s1", &store.Service{ID: "s1", Name: "S", Subdomain: "test", Target: plain.URL})
+	if got := serveOnce(t, h).Header().Get("X-Seen-Host"); got != "test.example.com" {
+		t.Errorf("after target change: backend Host %q, want client Host", got)
+	}
+}
+
+func TestHostMode_LocationUpgradedToHTTPS(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "http://"+r.Host+"/newpath", http.StatusFound) //nolint:gosec // test handler uses a controlled in-process host, not user input
 	}))
-	defer backend.Close()
-
+	t.Cleanup(backend.Close)
 	st := newTestStore(t)
-	st.AddService(&store.Service{ID: "l1", Name: "L", Subdomain: "redir", Target: backend.URL})
+	addSvc(st, backend.URL, "")
 	h := newTestHandler(t, st, nil)
 
-	loc := serveOnce(t, h, "redir.example.com").Header().Get("Location")
-	if loc != "http://redir.example.com/newpath" {
-		t.Errorf("Location: got %q, want http://redir.example.com/newpath", loc)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+	req.Host = "test.example.com"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	h.ServeHTTP(rec, req)
+	if loc := rec.Header().Get("Location"); loc != "https://test.example.com/newpath" {
+		t.Errorf("Location: got %q, want https://test.example.com/newpath", loc)
 	}
 }
 
 // TestServeHTTP_WebSocketOrigin mirrors Dozzle: the backend rejects the upgrade
 // unless the Origin host matches the Host it was sent.
 func TestServeHTTP_WebSocketOrigin(t *testing.T) {
+	for _, mode := range []string{"", "client", "backend"} {
+		t.Run("mode="+mode, func(t *testing.T) { testWebSocketOrigin(t, mode) })
+	}
+}
+
+func testWebSocketOrigin(t *testing.T, hostMode string) {
+	t.Helper()
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin, err := url.Parse(r.Header.Get("Origin"))
 		if err != nil || origin.Host != r.Host {
@@ -321,7 +383,7 @@ func TestServeHTTP_WebSocketOrigin(t *testing.T) {
 	defer backend.Close()
 
 	st := newTestStore(t)
-	st.AddService(&store.Service{ID: "w1", Name: "WS", Subdomain: "ws", Target: backend.URL})
+	st.AddService(&store.Service{ID: "w1", Name: "WS", Subdomain: "ws", Target: backend.URL, HostMode: hostMode})
 	front := httptest.NewServer(newTestHandler(t, st, nil))
 	defer front.Close()
 
