@@ -26,6 +26,7 @@ type createServiceRequest struct {
 	Tunnel       bool // route via CF tunnel instead of A record
 	DirectOnly   bool // no subdomain/DNS; link directly to target
 	SkipHealth   bool // skip health check polling
+	RewriteHost  bool // send the backend's own host as Host instead of the public one
 }
 
 func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +47,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 	req.Tunnel = util.ParseFormBool(r.FormValue("tunnel"))
 	req.DirectOnly = util.ParseFormBool(r.FormValue("direct_only"))
 	req.SkipHealth = util.ParseFormBool(r.FormValue("skip_health"))
+	req.RewriteHost = util.ParseFormBool(r.FormValue("rewrite_host"))
 
 	// Read uploaded icon if provided (stored as a file after the service ID is known).
 	var uploadedIconData []byte
@@ -141,6 +143,7 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 		ContainerName: containerName,
 		DirectOnly:    req.DirectOnly,
 		SkipHealth:    req.SkipHealth,
+		RewriteHost:   req.RewriteHost,
 		Order:         maxOrder + 1,
 		CreatedAt:     time.Now(),
 	}
@@ -197,14 +200,15 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateServiceRequest struct {
-	Name       string
-	Subdomain  string
-	Target     string
-	Category   string
-	Icon       *string // nil = keep existing; "" = clear; non-empty = set
-	Tunnel     *bool   // nil = keep existing; true/false = enable/disable
-	SkipHealth *bool   // nil = keep existing; true/false = skip health check
-	DirectOnly *bool   // nil = keep existing; true/false = direct link only
+	Name        string
+	Subdomain   string
+	Target      string
+	Category    string
+	Icon        *string // nil = keep existing; "" = clear; non-empty = set
+	Tunnel      *bool   // nil = keep existing; true/false = enable/disable
+	SkipHealth  *bool   // nil = keep existing; true/false = skip health check
+	RewriteHost *bool   // nil = keep existing; true/false = send backend host as Host
+	DirectOnly  *bool   // nil = keep existing; true/false = direct link only
 }
 
 // dnsState captures the DNS/tunnel configuration of a service, used as input and output for reconcileDNS.
@@ -420,6 +424,11 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 		v := util.ParseFormBool(r.FormValue("skip_health"))
 		req.SkipHealth = &v
 	}
+	// rewrite_host checkbox: only meaningful when the form includes a rewrite_host_present hidden field
+	if r.FormValue("rewrite_host_present") == "1" {
+		v := util.ParseFormBool(r.FormValue("rewrite_host"))
+		req.RewriteHost = &v
+	}
 	// direct_only checkbox: only meaningful when the form includes a direct_only_present hidden field
 	if r.FormValue("direct_only_present") == "1" {
 		v := util.ParseFormBool(r.FormValue("direct_only"))
@@ -437,6 +446,10 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 	skipHealth := svc.SkipHealth
 	if req.SkipHealth != nil {
 		skipHealth = *req.SkipHealth
+	}
+	rewriteHost := svc.RewriteHost
+	if req.RewriteHost != nil {
+		rewriteHost = *req.RewriteHost
 	}
 	directOnly := svc.DirectOnly
 	if req.DirectOnly != nil {
@@ -474,6 +487,7 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 		ContainerID:   svc.ContainerID,
 		ContainerName: svc.ContainerName,
 		SkipHealth:    skipHealth,
+		RewriteHost:   rewriteHost,
 		DirectOnly:    directOnly,
 		CreatedAt:     svc.CreatedAt,
 	}

@@ -366,5 +366,8 @@ These require `network_mode: host`. In bridge networking mode these paths are si
 **Full scan finds nothing**
 Check the scan log in **Manage → Status**. If no subnets are detected, add one manually via **Manage → Scan Subnets**. Increase `SCAN_TIMEOUT_MS` if scanning over a slow link or VLAN.
 
+**A proxied service shows the wrong site, "invalid host", or a redirect loop**
+By default Lantern passes the browser's `Host` header (e.g. `app.example.com`) through to the backend. That is what apps need for correct links, cookies and WebSocket Origin checks (the Dozzle shell, for example). A few backends only answer to their own address; for those, edit the service and tick **Rewrite Host** so Lantern sends the backend's address instead.
+
 **Scan is slow**
 Add `CAP_NET_RAW` — the ARP pre-sweep eliminates timeout waits for dead hosts. On a /24 with 20 live hosts, scan time drops from ~3 minutes to under 30 seconds.
