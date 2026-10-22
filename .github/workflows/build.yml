@@ -6,10 +6,11 @@ on:
     tags: ["v*.*.*"]
   pull_request:
     branches: [main, master]
-  # Daily rebuild (after the 06:00 UTC vuln auto-fix) so a new Chainguard base
-  # image, Go toolchain and cloudflared release ship without needing a code change.
+  # Weekly rebuild (Mondays 07:30 UTC) so a new Chainguard base image, Go
+  # toolchain and cloudflared release ship without needing a code change.
+  # Urgent Go vulnerabilities are handled sooner by the daily vuln-autofix job.
   schedule:
-    - cron: '30 7 * * *'
+    - cron: '30 7 * * 1'
   workflow_dispatch:
 
 env:
@@ -115,7 +116,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Date stamp passed to the Dockerfile so the cached cloudflared download
-      # layer is refreshed at most once a day instead of being reused forever.
+      # layer is refreshed on each new date instead of being reused forever.
       - name: Date stamp
         if: github.event_name != 'pull_request'
         id: stamp

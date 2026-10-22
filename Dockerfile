@@ -38,7 +38,7 @@ RUN apt-get update -qq && \
     setcap 'cap_net_bind_service=+ep cap_net_raw=+ep' /build/lantern
 
 # Download cloudflared for tunnel management. CLOUDFLARED_REFRESH (a date, set by
-# CI) is referenced in the command so the build cache re-downloads it daily.
+# CI) is referenced in the command so the build cache re-downloads it on each new date.
 ARG CLOUDFLARED_REFRESH=unset
 RUN echo "cloudflared refresh: ${CLOUDFLARED_REFRESH}" && \
     curl -fsSL -o /cloudflared \
