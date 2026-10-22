@@ -6,11 +6,8 @@ on:
     tags: ["v*.*.*"]
   pull_request:
     branches: [main, master]
-  # Weekly rebuild (Mondays 07:30 UTC) so a new Chainguard base image, Go
-  # toolchain and cloudflared release ship without needing a code change.
-  # Urgent Go vulnerabilities are handled sooner by the daily vuln-autofix job.
-  schedule:
-    - cron: '30 7 * * 1'
+  # Rebuilds with no code change (new base image, Go toolchain, cloudflared) are
+  # dispatched weekly by security.yml.
   workflow_dispatch:
 
 env:
@@ -154,40 +151,6 @@ jobs:
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
-
-  # cloudflared is a separate Go program shipped in the image; govulncheck on the
-  # module graph can't see it. Scan the release binary the image downloads.
-  # Not part of the required "CI" gate: a finding here usually has to be fixed
-  # upstream, so it should be visible (red run) without blocking merges.
-  scan-cloudflared:
-    name: Scan cloudflared
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: "go.mod"
-
-      - name: Install govulncheck
-        env:
-          GOTOOLCHAIN: auto  # govulncheck's own go.mod floor may be newer than ours
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
-
-      - name: Download cloudflared
-        run: |
-          curl -fsSL -o "$RUNNER_TEMP/cloudflared" \
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-
-      - name: govulncheck (binary mode)
-        env:
-          GOTOOLCHAIN: auto
-        run: govulncheck -mode=binary "$RUNNER_TEMP/cloudflared"
 
   # Stable aggregate gate for branch protection — depends on all PR-required jobs.
   # Branch protection should require only this check by name ("CI"), not the individual jobs.

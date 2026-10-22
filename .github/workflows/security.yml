@@ -1,10 +1,10 @@
 name: Security
 
-# Nightly: scan -> fix -> test -> push (see sloccy/shared-ci README). Pilot: manual runs only
-# until the schedule below is enabled.
+# Nightly: scan -> fix -> test -> push; weekly rebuild; one failure issue.
+# Policy and inputs: see the sloccy/shared-ci README.
 on:
-  # schedule:
-  #   - cron: '0 6 * * *'
+  schedule:
+    - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   security:
-    uses: sloccy/shared-ci/.github/workflows/security.yml@security-workflow
+    uses: sloccy/shared-ci/.github/workflows/security.yml@v1
     with:
       dry_run: ${{ inputs.dry_run == true }}
       target_branch: ${{ inputs.target_branch || '' }}

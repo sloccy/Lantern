@@ -2,6 +2,11 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
 FROM golang:1.26-trixie AS builder
 
+# The official golang image sets GOTOOLCHAIN=local. The nightly security job can raise
+# the go directive past the image's Go patch release; let the build fetch that toolchain
+# instead of failing until the image catches up.
+ENV GOTOOLCHAIN=auto
+
 # Build-time metadata (injected by CI via --build-arg).
 ARG BUILD_VERSION=dev
 ARG BUILD_COMMIT=unknown
