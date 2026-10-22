@@ -1,7 +1,7 @@
 {
   "name": "lantern",
   "private": true,
-  "description": "Vendor file version tracking for Dependabot",
+  "description": "Pinned front-end vendor versions (bumped by the nightly security job)",
   "dependencies": {
     "bootstrap": "5.3.8",
     "htmx.org": "2.0.10"
