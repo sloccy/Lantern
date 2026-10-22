@@ -37,8 +37,11 @@ RUN apt-get update -qq && \
     apt-get install -y --no-install-recommends libcap2-bin curl && \
     setcap 'cap_net_bind_service=+ep cap_net_raw=+ep' /build/lantern
 
-# Download cloudflared for tunnel management.
-RUN curl -fsSL -o /cloudflared \
+# Download cloudflared for tunnel management. CLOUDFLARED_REFRESH (a date, set by
+# CI) is referenced in the command so the build cache re-downloads it daily.
+ARG CLOUDFLARED_REFRESH=unset
+RUN echo "cloudflared refresh: ${CLOUDFLARED_REFRESH}" && \
+    curl -fsSL -o /cloudflared \
     "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${TARGETARCH}" \
     && chmod +x /cloudflared
 
