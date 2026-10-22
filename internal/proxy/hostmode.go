@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 )
@@ -45,6 +44,11 @@ var probeClient = &http.Client{
 func (h *Handler) hostModeFor(ctx context.Context, sub, targetStr string, target *url.URL, explicit, publicHost string) string {
 	if explicit == hostClient || explicit == hostBackend {
 		return explicit
+	}
+	// Like Caddy: an https upstream is addressed by its own host (self-signed
+	// devices such as UniFi, Proxmox and TrueNAS expect it). No probing needed.
+	if target.Scheme == "https" {
+		return hostBackend
 	}
 	if v, ok := h.hostModes.Load(sub); ok {
 		if e, ok := v.(*hostEntry); ok && e.target == targetStr {
@@ -114,7 +118,7 @@ func backendOrigin(hdr http.Header, publicHost string, target *url.URL) {
 	}
 }
 
-// upgradeFallbackTransport retries a refused WebSocket upgrade once with the
+// upgradeFallbackTransport retries a refused connection upgrade (WebSocket, etc.) once with the
 // backend's own Host. Some backends accept the public Host for normal pages
 // (so the "/" probe picks client mode) but reject it on upgrades. When the
 // retry succeeds the service switches to backend mode for good.
@@ -126,8 +130,7 @@ type upgradeFallbackTransport struct {
 
 func (t *upgradeFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := insecureTransport.RoundTrip(req)
-	if err != nil || resp.StatusCode == http.StatusSwitchingProtocols ||
-		!strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+	if err != nil || resp.StatusCode == http.StatusSwitchingProtocols || req.Header.Get("Upgrade") == "" {
 		return resp, err
 	}
 	info, _ := req.Context().Value(hostModeCtxKey{}).(hostModeInfo)
@@ -139,7 +142,7 @@ func (t *upgradeFallbackTransport) RoundTrip(req *http.Request) (*http.Response,
 		if err2 == nil && resp2.StatusCode == http.StatusSwitchingProtocols {
 			_ = resp.Body.Close()
 			t.h.setHostMode(t.sub, info.targetStr, hostBackend)
-			log.Printf("proxy: %s host mode = backend (WebSocket upgrade refused with public Host)", t.sub) //nolint:gosec // sub is a store-validated subdomain
+			log.Printf("proxy: %s host mode = backend (upgrade refused with public Host)", t.sub) //nolint:gosec // sub is a store-validated subdomain
 			return resp2, nil
 		}
 		if err2 == nil {
@@ -147,7 +150,7 @@ func (t *upgradeFallbackTransport) RoundTrip(req *http.Request) (*http.Response,
 		}
 	}
 	// Refused upgrade: say why, since the browser only reports "connection refused".
-	log.Printf("proxy: %s WebSocket upgrade refused by backend: status %d (host mode %q, Host %q, Origin %q)", //nolint:gosec // values are request headers logged for diagnosis
+	log.Printf("proxy: %s upgrade refused by backend: status %d (host mode %q, Host %q, Origin %q)", //nolint:gosec // values are request headers logged for diagnosis
 		t.sub, resp.StatusCode, info.mode, req.Host, req.Header.Get("Origin"))
 	return resp, nil
 }

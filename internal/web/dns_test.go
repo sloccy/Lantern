@@ -70,26 +70,14 @@ func TestPlanDNS(t *testing.T) {
 		},
 		{
 			name: "tunnel unchanged",
-			old:  dnsState{Subdomain: "plex", Tunnel: true, Target: "http://10.0.0.1:32400"},
-			want: dnsState{Subdomain: "plex", Tunnel: true, Target: "http://10.0.0.1:32400"},
+			old:  dnsState{Subdomain: "plex", Tunnel: true},
+			want: dnsState{Subdomain: "plex", Tunnel: true},
 			act:  dnsNoop,
 		},
 		{
 			name: "tunnel subdomain change",
-			old:  dnsState{Subdomain: "old", Tunnel: true, Target: "http://10.0.0.1:32400"},
-			want: dnsState{Subdomain: "new", Tunnel: true, Target: "http://10.0.0.1:32400"},
-			act:  dnsReplaceTunnel,
-		},
-		{
-			name: "tunnel target change",
-			old:  dnsState{Subdomain: "plex", Tunnel: true, Target: "http://10.0.0.1:32400"},
-			want: dnsState{Subdomain: "plex", Tunnel: true, Target: "http://10.0.0.2:32400"},
-			act:  dnsReplaceTunnel,
-		},
-		{
-			name: "tunnel subdomain and target change",
-			old:  dnsState{Subdomain: "old", Tunnel: true, Target: "http://10.0.0.1:32400"},
-			want: dnsState{Subdomain: "new", Tunnel: true, Target: "http://10.0.0.2:32400"},
+			old:  dnsState{Subdomain: "old", Tunnel: true},
+			want: dnsState{Subdomain: "new", Tunnel: true},
 			act:  dnsReplaceTunnel,
 		},
 	}

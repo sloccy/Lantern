@@ -2,8 +2,10 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,6 +20,12 @@ type Config struct {
 	DataDir      string
 	ScanInterval time.Duration
 	ScanTimeout  time.Duration
+
+	// TrustedProxies are extra peers (besides loopback, where the Cloudflare
+	// tunnel connects from) whose X-Forwarded-* / CF-Connecting-IP headers are believed.
+	TrustedProxies []*net.IPNet
+	Compression    bool // gzip compressible proxied responses (COMPRESSION=false disables)
+	LogRequests    bool // one log line per proxied request (LOG_REQUESTS=true)
 }
 
 func Load() (*Config, error) {
@@ -39,6 +47,11 @@ func Load() (*Config, error) {
 		}
 	}
 
+	trusted, err := ParseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Domain:       getEnv("DOMAIN", ""),
 		CFAPIToken:   os.Getenv("CF_API_TOKEN"),
@@ -49,8 +62,40 @@ func Load() (*Config, error) {
 		DataDir:      getEnv("DATA_DIR", "/data"),
 		ScanInterval: scanInterval,
 		ScanTimeout:  time.Duration(scanTimeoutMs) * time.Millisecond,
+
+		TrustedProxies: trusted,
+		Compression:    os.Getenv("COMPRESSION") != "false",
+		LogRequests:    os.Getenv("LOG_REQUESTS") == "true",
 	}
 	return cfg, nil
+}
+
+// ParseTrustedProxies parses a comma-separated list of CIDRs or bare IPs.
+func ParseTrustedProxies(s string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for part := range strings.SplitSeq(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if !strings.Contains(part, "/") {
+			ip := net.ParseIP(part)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q", part)
+			}
+			bits := 128
+			if ip.To4() != nil {
+				bits = 32
+			}
+			part = fmt.Sprintf("%s/%d", ip, bits)
+		}
+		_, n, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TRUSTED_PROXIES entry %q: %w", part, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 func getEnv(key, def string) string {

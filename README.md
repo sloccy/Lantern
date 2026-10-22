@@ -140,6 +140,8 @@ To route services through a Cloudflare Zero Trust tunnel instead of exposing por
 
 `SERVER_IP` is optional in tunnel mode — no A records are created for tunneled services.
 
+Tunnel traffic is sent to Lantern's own HTTPS listener (`https://localhost:443`, inside the container) and then proxied to the service, so tunneled and LAN requests behave identically. Lantern re-asserts the tunnel routes and DNS records for every service every 5 minutes, which also migrates routes created by older versions. The real visitor address is read from Cloudflare's `CF-Connecting-IP` header, but only for connections from loopback (where `cloudflared` runs) or from `TRUSTED_PROXIES`.
+
 ### Bridge networking fallback
 
 If host networking is not available (e.g., on a shared host or Kubernetes):
@@ -186,6 +188,9 @@ All configuration is via environment variables.
 | `DATA_DIR` | `/data` | Persistent data directory inside the container. |
 | `SCAN_INTERVAL` | `24h` | Background scan interval. Accepts Go duration strings: `6h`, `30m`, etc. |
 | `SCAN_TIMEOUT_MS` | `200` | TCP dial timeout per port during full network scans, in milliseconds. Increase for slow links. |
+| `TRUSTED_PROXIES` | — | Comma-separated IPs/CIDRs (e.g. `10.0.0.0/8`) of another proxy in front of Lantern whose `X-Forwarded-*` headers should be believed. Loopback is always trusted. |
+| `COMPRESSION` | `true` | gzip-compress text/JSON/etc. responses that the backend didn't already compress. Set `false` to disable. |
+| `LOG_REQUESTS` | `false` | Log one line per proxied request (service, path, status, duration, Host mode). |
 
 ---
 
@@ -367,7 +372,7 @@ These require `network_mode: host`. In bridge networking mode these paths are si
 Check the scan log in **Manage → Status**. If no subnets are detected, add one manually via **Manage → Scan Subnets**. Increase `SCAN_TIMEOUT_MS` if scanning over a slow link or VLAN.
 
 **A proxied service shows "invalid host", the wrong site, or a redirect loop**
-Lantern forwards the browser's `Host` header (e.g. `app.example.com`) like Caddy or nginx do, and automatically falls back to the backend's own address for services that reject it. If auto picks wrong, edit the service and set **Host header** to *Client* or *Backend*.
+Lantern behaves like Caddy: `http://` backends receive the browser's `Host` header (e.g. `app.example.com`) and fall back automatically to their own address if they reject it (including for WebSocket upgrades); `https://` backends receive their own address. If auto picks wrong, edit the service and set **Host header** to *Client* or *Backend*. Set `LOG_REQUESTS=true` to see what is happening.
 
 **Scan is slow**
 Add `CAP_NET_RAW` — the ARP pre-sweep eliminates timeout waits for dead hosts. On a /24 with 20 live hosts, scan time drops from ~3 minutes to under 30 seconds.

@@ -123,7 +123,21 @@ func (m *Manager) SyncServices(ctx context.Context) {
 			log.Printf("dns: sync lantern.%s: %v", m.cfg.Domain, err)
 		}
 	}
-	for _, svc := range m.store.GetAllServices() {
+	services := m.store.GetAllServices()
+
+	// Tunnel ingress rules must point at Lantern (not at the backend), so every
+	// tunneled request goes through the proxy. This also migrates old rules.
+	var tunnelHosts []string
+	for _, svc := range services {
+		if !svc.DirectOnly && svc.Subdomain != "" && svc.TunnelRouteID != "" {
+			tunnelHosts = append(tunnelHosts, svc.Subdomain+"."+m.cfg.Domain)
+		}
+	}
+	if err := m.cf.EnsureTunnelRoutes(ctx, tunnelHosts); err != nil {
+		log.Printf("dns: sync tunnel routes: %v", err)
+	}
+
+	for _, svc := range services {
 		if svc.DirectOnly || svc.Subdomain == "" {
 			continue
 		}

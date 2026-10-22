@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"fmt"
 	"html"
+	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -16,12 +18,15 @@ import (
 	"lantern/internal/store"
 )
 
+// insecureTransport talks to backends. Timeouts and keep-alive mirror Caddy's
+// reverse_proxy defaults: a dead backend fails in 3s with the 502 page rather
+// than hanging on the OS connect timeout.
 var insecureTransport = &http.Transport{
 	TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // intentional for backend self-signed certs
-	IdleConnTimeout:     90 * time.Second,
+	DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	IdleConnTimeout:     2 * time.Minute,
 	TLSHandshakeTimeout: 10 * time.Second,
-	MaxIdleConns:        32,
-	MaxIdleConnsPerHost: 4,
+	MaxIdleConnsPerHost: 32,
 }
 
 // bufferPool implements httputil.BufferPool using sync.Pool to reuse the
@@ -55,6 +60,7 @@ type hostModeInfo struct {
 	mode      string
 	auto      bool   // mode came from auto-detection (not an explicit setting)
 	targetStr string // svc.Target, used as the auto-detect cache key
+	start     time.Time
 }
 
 // Handler is the top-level HTTP handler that routes by subdomain.
@@ -64,24 +70,31 @@ type Handler struct {
 	webHandler  http.Handler
 	proxies     sync.Map // subdomain → *proxyEntry
 	hostModes   sync.Map // subdomain → *hostEntry (auto-detected Host mode)
+	domain      string   // lower-cased cfg.Domain
 	suffix      string   // ".domain.tld" — pre-computed from cfg.Domain
 	lanternHost string   // "lantern.domain.tld" — pre-computed from cfg.Domain
 }
 
 func New(cfg *config.Config, st *store.Store, webHandler http.Handler) *Handler {
-	suffix := "." + cfg.Domain
-	return &Handler{cfg: cfg, store: st, webHandler: webHandler, suffix: suffix, lanternHost: "lantern" + suffix}
+	domain := strings.ToLower(cfg.Domain)
+	suffix := "." + domain
+	return &Handler{cfg: cfg, store: st, webHandler: webHandler, domain: domain, suffix: suffix, lanternHost: "lantern" + suffix}
+}
+
+// normalizeHost lower-cases a Host header and strips the port and any trailing
+// dot (DNS names are case-insensitive and "example.com." is the same name).
+func normalizeHost(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	host := r.Host
-	// Strip port if present.
-	if i := strings.LastIndexByte(host, ':'); i != -1 {
-		host = host[:i]
-	}
+	host := normalizeHost(r.Host)
 
 	switch {
-	case host == h.lanternHost || host == h.cfg.Domain || host == "":
+	case host == h.lanternHost || host == h.domain || host == "":
 		h.webHandler.ServeHTTP(w, r)
 		return
 	case strings.HasSuffix(host, h.suffix):
@@ -117,8 +130,13 @@ func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub str
 		rp = h.buildProxy(sub, target)
 		h.proxies.Store(sub, &proxyEntry{rp: rp, target: svc.Target})
 	}
+	if h.cfg.Compression {
+		var done func()
+		w, done = compressResponse(w, r)
+		defer done()
+	}
 	mode := h.hostModeFor(r.Context(), sub, svc.Target, target, svc.HostMode, r.Host)
-	ctx := context.WithValue(r.Context(), hostModeCtxKey{}, hostModeInfo{mode: mode, auto: svc.HostMode == "", targetStr: svc.Target})
+	ctx := context.WithValue(r.Context(), hostModeCtxKey{}, hostModeInfo{mode: mode, auto: svc.HostMode == "", targetStr: svc.Target, start: time.Now()})
 	rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -153,12 +171,15 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 		} else {
 			pr.Out.Host = pr.In.Host
 		}
-		pr.SetXForwarded()
-		pr.Out.Header.Set("X-Real-IP", realIP(pr.Out))
-		// Preserve upstream X-Forwarded-Proto (e.g. from Cloudflare)
-		// instead of using SetXForwarded's TLS-only detection.
-		if proto := pr.In.Header.Get("X-Forwarded-Proto"); proto != "" {
-			pr.Out.Header.Set("X-Forwarded-Proto", proto)
+		// Client-supplied forwarding headers are only believed from a trusted
+		// peer (the tunnel on loopback); otherwise the TCP peer is the client.
+		pr.SetXForwarded() // X-Forwarded-Host
+		ip := h.clientIP(pr.In)
+		pr.Out.Header.Set("X-Forwarded-For", ip)
+		pr.Out.Header.Set("X-Real-IP", ip)
+		pr.Out.Header.Set("X-Forwarded-Proto", h.forwardedProto(pr.In))
+		if !h.trustedPeer(pr.In) {
+			pr.Out.Header.Del("Cf-Connecting-Ip")
 		}
 	}
 	// Keep Location headers on the public site: a redirect to the backend's own
@@ -170,6 +191,10 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 		// Safety net: a backend answering 421 to the public Host needs its own.
 		if info.auto && info.mode == hostClient && resp.StatusCode == http.StatusMisdirectedRequest {
 			h.setHostMode(sub, info.targetStr, hostBackend)
+		}
+		if h.cfg.LogRequests {
+			log.Printf("proxy: %s %s %s → %d (%s, host mode %s)", sub, resp.Request.Method, resp.Request.URL.Path, //nolint:gosec // request path logged for diagnosis
+				resp.StatusCode, time.Since(info.start).Round(time.Millisecond), info.mode)
 		}
 		loc := resp.Header.Get("Location")
 		if loc == "" {
@@ -203,16 +228,6 @@ func (h *Handler) errorPage(w http.ResponseWriter, code int, msg string) {
 		title = "Service Not Found"
 	}
 	_, _ = fmt.Fprintf(w, errorHTML, title, title, msg, h.cfg.Domain) //nolint:gosec // errorHTML is a fixed format string; caller-escaped variables
-}
-
-func realIP(r *http.Request) string {
-	if ip := r.Header.Get("X-Real-IP"); ip != "" {
-		return ip
-	}
-	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
-		return strings.SplitN(ip, ",", 2)[0]
-	}
-	return r.RemoteAddr
 }
 
 const errorHTML = `<!DOCTYPE html>

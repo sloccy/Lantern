@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 )
 
 // TunnelEnabled reports whether Cloudflare Tunnel management is active.
@@ -19,15 +20,58 @@ func (c *Client) TunnelAvailable() bool {
 	return !c.noop && c.accountID != ""
 }
 
-// AddTunnelRoute adds a hostname ingress rule to the tunnel and creates the
+// LanternOrigin is where tunnel traffic is sent: Lantern's own HTTPS listener
+// (cloudflared runs in the same container). Every tunneled request therefore
+// goes through Lantern's proxy exactly like a LAN request, instead of straight
+// to the backend.
+const LanternOrigin = "https://localhost:443"
+
+// lanternRule is the ingress rule that sends hostname to Lantern. The original
+// Host header is kept by cloudflared; the SNI is set to the hostname so
+// Lantern's certificate lookup works.
+func lanternRule(hostname string) ingressRule {
+	return ingressRule{
+		Hostname:      hostname,
+		Service:       LanternOrigin,
+		OriginRequest: &originRequest{NoTLSVerify: true, OriginServerName: hostname},
+	}
+}
+
+// upsertRule replaces the rule for rule.Hostname in place, or appends it.
+func upsertRule(rules []ingressRule, rule ingressRule) []ingressRule {
+	for i := range rules {
+		if rules[i].Hostname == rule.Hostname {
+			rules[i] = rule
+			return rules
+		}
+	}
+	return append(rules, rule)
+}
+
+// EnsureTunnelRoutes makes sure every hostname has an ingress rule pointing at
+// Lantern, rewriting stale rules (e.g. ones that point straight at a backend).
+// It reads the tunnel config once and writes it only if something changed.
+func (c *Client) EnsureTunnelRoutes(ctx context.Context, hostnames []string) error {
+	if !c.TunnelEnabled() || len(hostnames) == 0 {
+		return nil
+	}
+	return c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
+		for _, h := range hostnames {
+			rules = upsertRule(rules, lanternRule(h))
+		}
+		return rules
+	})
+}
+
+// AddTunnelRoute adds a hostname ingress rule (to Lantern) and creates the
 // corresponding CNAME DNS record pointing to the tunnel endpoint.
 // Returns the CNAME DNS record ID for later cleanup.
-func (c *Client) AddTunnelRoute(ctx context.Context, hostname, backend string) (cnameID string, err error) {
+func (c *Client) AddTunnelRoute(ctx context.Context, hostname string) (cnameID string, err error) {
 	if !c.TunnelEnabled() {
 		return "", nil
 	}
 	if err := c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
-		return append(removeHostname(rules, hostname), ingressRule{Hostname: hostname, Service: backend})
+		return upsertRule(rules, lanternRule(hostname))
 	}); err != nil {
 		return "", fmt.Errorf("add tunnel route %s: %w", hostname, err)
 	}
@@ -67,12 +111,12 @@ func (c *Client) RemoveTunnelRoute(ctx context.Context, hostname, cnameID string
 // ReplaceTunnelRoute atomically removes an old hostname route and adds a new one
 // in a single ingress update, then swaps the CNAME DNS record.
 // Returns the new CNAME record ID.
-func (c *Client) ReplaceTunnelRoute(ctx context.Context, oldHostname, newHostname, backend, oldCNAMEID string) (newCNAMEID string, err error) {
+func (c *Client) ReplaceTunnelRoute(ctx context.Context, oldHostname, newHostname, oldCNAMEID string) (newCNAMEID string, err error) {
 	if !c.TunnelEnabled() {
 		return "", nil
 	}
 	if err := c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
-		return append(removeHostname(rules, oldHostname), ingressRule{Hostname: newHostname, Service: backend})
+		return upsertRule(removeHostname(rules, oldHostname), lanternRule(newHostname))
 	}); err != nil {
 		return "", fmt.Errorf("replace tunnel route %s→%s: %w", oldHostname, newHostname, err)
 	}
@@ -118,7 +162,11 @@ func (c *Client) modifyIngress(ctx context.Context, fn func([]ingressRule) []ing
 		}
 	}
 
+	before := slices.Clone(named)
 	named = fn(named)
+	if slices.EqualFunc(before, named, ingressRuleEqual) {
+		return nil // nothing to change
+	}
 
 	// Always re-append catch-all last; create a default if one wasn't present.
 	if catchAll != nil {
@@ -157,6 +205,16 @@ func (c *Client) createCNAME(ctx context.Context, hostname string) (string, erro
 		return "", fmt.Errorf("create CNAME %s: %w", hostname, err)
 	}
 	return id, nil
+}
+
+func ingressRuleEqual(a, b ingressRule) bool {
+	if a.Hostname != b.Hostname || a.Service != b.Service {
+		return false
+	}
+	if (a.OriginRequest == nil) != (b.OriginRequest == nil) {
+		return false
+	}
+	return a.OriginRequest == nil || *a.OriginRequest == *b.OriginRequest
 }
 
 // removeHostname returns a new slice with all rules for hostname removed.

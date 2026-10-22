@@ -152,7 +152,6 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 	// reconcileDNS with a zero old state handles creation; direct-only is a no-op.
 	want := dnsState{
 		Subdomain:  subdomain,
-		Target:     svc.Target,
 		DirectOnly: req.DirectOnly,
 		Tunnel:     req.Tunnel,
 	}
@@ -214,7 +213,6 @@ type updateServiceRequest struct {
 // dnsState captures the DNS/tunnel configuration of a service, used as input and output for reconcileDNS.
 type dnsState struct {
 	Subdomain     string
-	Target        string
 	DirectOnly    bool
 	Tunnel        bool // true when routed via CF tunnel (TunnelRouteID != "")
 	DNSRecordID   string
@@ -250,7 +248,7 @@ const (
 	dnsCreateTunnel            // add a new tunnel route
 	dnsAToTunnel               // delete A record then add tunnel route
 	dnsTunnelToA               // remove tunnel route then create A record
-	dnsReplaceTunnel           // replace tunnel route (subdomain or target changed)
+	dnsReplaceTunnel           // replace tunnel route (subdomain changed)
 )
 
 // planDNS is a pure function that maps old and new DNS states to the action needed.
@@ -284,7 +282,7 @@ func planDNS(old, want dnsState) dnsAction {
 		case modeARecord:
 			return dnsTunnelToA
 		case modeTunnel:
-			if want.Subdomain != old.Subdomain || want.Target != old.Target {
+			if want.Subdomain != old.Subdomain {
 				return dnsReplaceTunnel
 			}
 			return dnsNoop
@@ -341,7 +339,7 @@ func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, t
 
 	case dnsCreateTunnel:
 		if s.cf.TunnelEnabled() {
-			id, err := s.cf.AddTunnelRoute(ctx, newHostname, want.Target)
+			id, err := s.cf.AddTunnelRoute(ctx, newHostname)
 			if err != nil {
 				log.Printf("web: add tunnel route %s: %v", want.Subdomain, err)
 			} else {
@@ -356,7 +354,7 @@ func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, t
 					log.Printf("web: delete DNS %s: %v", old.Subdomain, err)
 				}
 			}
-			id, err := s.cf.AddTunnelRoute(ctx, newHostname, want.Target)
+			id, err := s.cf.AddTunnelRoute(ctx, newHostname)
 			if err != nil {
 				log.Printf("web: add tunnel route %s: %v", want.Subdomain, err)
 			} else {
@@ -379,7 +377,7 @@ func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, t
 
 	case dnsReplaceTunnel:
 		if s.cf.TunnelEnabled() {
-			id, err := s.cf.ReplaceTunnelRoute(ctx, oldHostname, newHostname, want.Target, old.DNSRecordID)
+			id, err := s.cf.ReplaceTunnelRoute(ctx, oldHostname, newHostname, old.DNSRecordID)
 			if err != nil {
 				log.Printf("web: replace tunnel route %s→%s: %v", old.Subdomain, want.Subdomain, err)
 				return old.DNSRecordID, old.TunnelRouteID
@@ -499,7 +497,6 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 	}
 	old := dnsState{
 		Subdomain:     oldSub,
-		Target:        svc.Target,
 		DirectOnly:    svc.DirectOnly,
 		Tunnel:        oldTunnelRoute != "",
 		DNSRecordID:   oldDNSID,
@@ -507,7 +504,6 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 	}
 	want := dnsState{
 		Subdomain:  newSub,
-		Target:     newTarget,
 		DirectOnly: directOnly,
 		Tunnel:     wantTunnel,
 	}

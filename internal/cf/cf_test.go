@@ -250,7 +250,7 @@ func TestNoopOperations(t *testing.T) {
 	if err := c.UpdateRecord(ctx, "id1", "1.2.3.4"); err != nil {
 		t.Errorf("noop UpdateRecord: %v", err)
 	}
-	if cnameID, err := c.AddTunnelRoute(ctx, "h", "b"); err != nil || cnameID != "" {
+	if cnameID, err := c.AddTunnelRoute(ctx, "h"); err != nil || cnameID != "" {
 		t.Errorf("noop AddTunnelRoute: id=%q err=%v", cnameID, err)
 	}
 	if err := c.RemoveTunnelRoute(ctx, "h", "id1"); err != nil {
@@ -320,5 +320,75 @@ func TestEnsureCNAME(t *testing.T) {
 	}
 	if id, err := c.EnsureCNAME(ctx, "missing.example.com"); err != nil || id != "c3" || !created {
 		t.Errorf("missing: id=%q err=%v created=%v", id, err, created)
+	}
+}
+
+// ---- Tunnel ingress -> Lantern -----------------------------------------------
+
+type tunnelMock struct {
+	rules []ingressRule
+	puts  int
+	last  []ingressRule
+}
+
+func newTunnelMock(t *testing.T, initial []ingressRule) *tunnelMock {
+	t.Helper()
+	m := &tunnelMock{rules: initial}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			var body struct {
+				Config struct {
+					Ingress []ingressRule `json:"ingress"`
+				} `json:"config"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			m.puts++
+			m.last = body.Config.Ingress
+			m.rules = body.Config.Ingress
+			_, _ = w.Write(cfOK(map[string]any{}))
+			return
+		}
+		_, _ = w.Write(cfOK(map[string]any{"config": map[string]any{"ingress": m.rules}}))
+	})
+	cfServer(t, mux)
+	return m
+}
+
+func TestEnsureTunnelRoutes_RewritesStaleRuleToLantern(t *testing.T) {
+	m := newTunnelMock(t, []ingressRule{
+		{Hostname: "plex.example.com", Service: "http://10.0.0.5:32400"}, // old: straight to backend
+		{Service: "http_status:404"},
+	})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	if err := c.EnsureTunnelRoutes(context.Background(), []string{"plex.example.com", "new.example.com"}); err != nil {
+		t.Fatalf("EnsureTunnelRoutes: %v", err)
+	}
+	if m.puts != 1 || len(m.last) != 3 {
+		t.Fatalf("puts=%d rules=%+v, want 1 put with 3 rules", m.puts, m.last)
+	}
+	for _, r := range m.last[:2] {
+		if r.Service != LanternOrigin || r.OriginRequest == nil || !r.OriginRequest.NoTLSVerify || r.OriginRequest.OriginServerName != r.Hostname {
+			t.Errorf("rule not pointing at Lantern: %+v", r)
+		}
+	}
+	if last := m.last[2]; last.Hostname != "" || last.Service != "http_status:404" {
+		t.Errorf("catch-all must stay last, got %+v", last)
+	}
+
+	// Already correct: no further write.
+	if err := c.EnsureTunnelRoutes(context.Background(), []string{"plex.example.com", "new.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if m.puts != 1 {
+		t.Errorf("puts=%d after no-op ensure, want still 1", m.puts)
+	}
+}
+
+func TestEnsureTunnelRoutes_NoopWithoutTunnel(t *testing.T) {
+	c, _ := New("tok", "zone1", "", "") // no tunnel configured
+	if err := c.EnsureTunnelRoutes(context.Background(), []string{"x.example.com"}); err != nil {
+		t.Errorf("err = %v, want nil", err)
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"lantern/internal/cf"
@@ -250,5 +252,42 @@ func TestSyncServices_RepairsAndStoresIDs(t *testing.T) {
 	}
 	if got := st.GetServiceByID("b").DNSRecordID; got != "id-gone.example.com" {
 		t.Errorf("stored DNSRecordID = %q", got)
+	}
+}
+
+func TestSyncServices_PointsTunnelRoutesAtLantern(t *testing.T) {
+	var putBody string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, map[string]any{"success": true, "result": []string{}})
+			return
+		}
+		writeJSON(w, map[string]any{"success": true, "result": map[string]string{"id": "cname1"}})
+	})
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			b, _ := io.ReadAll(r.Body)
+			putBody = string(b)
+			writeJSON(w, map[string]any{"success": true, "result": map[string]any{}})
+			return
+		}
+		writeJSON(w, map[string]any{"success": true, "result": map[string]any{"config": map[string]any{"ingress": []map[string]string{
+			{"hostname": "plex.example.com", "service": "http://10.0.0.5:32400"},
+			{"service": "http_status:404"},
+		}}}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	cf.SetBaseURLForTest(t, srv.URL)
+
+	st := newTestStore(t)
+	st.AddService(&store.Service{ID: "a", Subdomain: "plex", Target: "http://10.0.0.5:32400", TunnelRouteID: "plex.example.com"})
+	c, _ := cf.New("tok", "zone1", "tid", "acct")
+	m := New(&config.Config{Domain: "example.com", ServerIP: "10.0.0.1"}, st, c)
+	m.SyncServices(context.Background())
+
+	if !strings.Contains(putBody, "https://localhost:443") || strings.Contains(putBody, "10.0.0.5") {
+		t.Errorf("ingress not rewritten to Lantern: %s", putBody)
 	}
 }

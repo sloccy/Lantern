@@ -2,11 +2,14 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"lantern/internal/config"
 	"lantern/internal/store"
@@ -23,7 +26,7 @@ func newTestStore(t *testing.T) *store.Store {
 
 func newTestHandler(t *testing.T, st *store.Store, webHandler http.Handler) *Handler {
 	t.Helper()
-	cfg := &config.Config{Domain: "example.com"}
+	cfg := &config.Config{Domain: "example.com", Compression: true}
 	if webHandler == nil {
 		webHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -136,61 +139,161 @@ func TestServeHTTP_LocationRewrite(t *testing.T) {
 	}
 }
 
-func TestServeHTTP_XForwardedProto(t *testing.T) {
-	var gotProto string
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotProto = r.Header.Get("X-Forwarded-Proto")
+// forwardedBackend reports the forwarding headers the backend received.
+func forwardedBackend(t *testing.T) (*httptest.Server, *http.Header) {
+	t.Helper()
+	got := &http.Header{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*got = r.Header.Clone()
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer backend.Close()
+	t.Cleanup(srv.Close)
+	return srv, got
+}
 
+func TestForwardedHeaders_TrustMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		remote     string
+		cfIP, xff  string
+		proto      string
+		realIP     string
+		wantIP     string
+		wantProto  string
+		wantCFSeen bool
+	}{
+		{"untrusted peer cannot spoof", "203.0.113.9:4000", "6.6.6.6", "7.7.7.7", "https", "8.8.8.8", "203.0.113.9", "http", false},
+		{"loopback tunnel uses CF-Connecting-IP", "127.0.0.1:4000", "198.51.100.7", "", "https", "", "198.51.100.7", "https", true},
+		{"loopback falls back to XFF", "[::1]:4000", "", "198.51.100.8, 10.0.0.1", "", "", "198.51.100.8", "http", false},
+		{"loopback without headers", "127.0.0.1:4000", "", "", "", "", "127.0.0.1", "http", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, got := forwardedBackend(t)
+			st := newTestStore(t)
+			addSvc(st, backend.URL, "")
+			h := newTestHandler(t, st, nil)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+			req.Host = "test.example.com"
+			req.RemoteAddr = tt.remote
+			for k, v := range map[string]string{"Cf-Connecting-Ip": tt.cfIP, "X-Forwarded-For": tt.xff, "X-Forwarded-Proto": tt.proto, "X-Real-IP": tt.realIP} {
+				if v != "" {
+					req.Header.Set(k, v)
+				}
+			}
+			h.ServeHTTP(rec, req)
+
+			if v := got.Get("X-Real-IP"); v != tt.wantIP {
+				t.Errorf("X-Real-IP = %q, want %q", v, tt.wantIP)
+			}
+			if v := got.Get("X-Forwarded-For"); v != tt.wantIP {
+				t.Errorf("X-Forwarded-For = %q, want %q", v, tt.wantIP)
+			}
+			if v := got.Get("X-Forwarded-Proto"); v != tt.wantProto {
+				t.Errorf("X-Forwarded-Proto = %q, want %q", v, tt.wantProto)
+			}
+			if seen := got.Get("Cf-Connecting-Ip") != ""; seen != tt.wantCFSeen {
+				t.Errorf("CF-Connecting-IP reached backend = %v, want %v", seen, tt.wantCFSeen)
+			}
+		})
+	}
+}
+
+func TestForwardedHeaders_ConfiguredTrustedProxy(t *testing.T) {
+	backend, got := forwardedBackend(t)
 	st := newTestStore(t)
-	st.AddService(&store.Service{
-		ID:        "svc3",
-		Name:      "Proto",
-		Subdomain: "proto",
-		Target:    backend.URL,
-	})
+	addSvc(st, backend.URL, "")
+	cfg := &config.Config{Domain: "example.com", TrustedProxies: mustCIDRs(t, "10.0.0.0/8")}
+	h := New(cfg, st, http.NotFoundHandler())
 
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+	req.Host = "test.example.com"
+	req.RemoteAddr = "10.1.2.3:5000"
+	req.Header.Set("X-Forwarded-For", "198.51.100.1")
+	h.ServeHTTP(rec, req)
+	if v := got.Get("X-Real-IP"); v != "198.51.100.1" {
+		t.Errorf("X-Real-IP = %q, want 198.51.100.1", v)
+	}
+}
+
+func mustCIDRs(t *testing.T, s string) []*net.IPNet {
+	t.Helper()
+	n, err := config.ParseTrustedProxies(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestNormalizeHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"App.Example.COM":     "app.example.com",
+		"app.example.com:443": "app.example.com",
+		"app.example.com.":    "app.example.com",
+		"APP.example.com.:80": "app.example.com",
+		"":                    "",
+	} {
+		if got := normalizeHost(in); got != want {
+			t.Errorf("normalizeHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestServeHTTP_MixedCaseHostRoutes(t *testing.T) {
+	backend := hostEcho(t)
+	st := newTestStore(t)
+	addSvc(st, backend.URL, "")
 	h := newTestHandler(t, st, nil)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
-	req.Host = "proto.example.com"
-	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Host = "Test.Example.com."
 	h.ServeHTTP(rec, req)
-
-	if gotProto != "https" {
-		t.Errorf("X-Forwarded-Proto: got %q, want https", gotProto)
+	if rec.Code != http.StatusOK {
+		t.Errorf("mixed-case host: got %d, want 200", rec.Code)
 	}
 }
 
-func TestRealIP(t *testing.T) {
-	tests := []struct {
-		name       string
-		realIP     string
-		forwarded  string
-		remoteAddr string
-		want       string
-	}{
-		{"X-Real-IP wins", "1.2.3.4", "5.6.7.8", "9.10.11.12:9999", "1.2.3.4"},
-		{"X-Forwarded-For first", "", "5.6.7.8, 9.10.11.12", "13.14.15.16:9999", "5.6.7.8"},
-		{"RemoteAddr fallback", "", "", "9.10.11.12:9999", "9.10.11.12:9999"},
+func TestHostMode_HTTPSBackendDefaultsToBackendHost(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Seen-Host", r.Host)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	st := newTestStore(t)
+	addSvc(st, srv.URL, "")
+	h := newTestHandler(t, st, nil)
+
+	want := strings.TrimPrefix(srv.URL, "https://")
+	if got := serveOnce(t, h).Header().Get("X-Seen-Host"); got != want {
+		t.Errorf("https backend saw Host %q, want %q", got, want)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
-			req.RemoteAddr = tt.remoteAddr
-			if tt.realIP != "" {
-				req.Header.Set("X-Real-IP", tt.realIP)
-			}
-			if tt.forwarded != "" {
-				req.Header.Set("X-Forwarded-For", tt.forwarded)
-			}
-			if got := realIP(req); got != tt.want {
-				t.Errorf("realIP() = %q, want %q", got, tt.want)
-			}
-		})
+
+	// An explicit setting still wins.
+	st2 := newTestStore(t)
+	addSvc(st2, srv.URL, "client")
+	h2 := newTestHandler(t, st2, nil)
+	if got := serveOnce(t, h2).Header().Get("X-Seen-Host"); got != "test.example.com" {
+		t.Errorf("explicit client mode saw Host %q, want test.example.com", got)
+	}
+}
+
+func TestTransport_DeadBackendFailsFast(t *testing.T) {
+	// 192.0.2.0/24 is TEST-NET-1: packets are dropped, so connect would hang.
+	st := newTestStore(t)
+	addSvc(st, "http://192.0.2.1:9", "client")
+	h := newTestHandler(t, st, nil)
+
+	start := time.Now()
+	rec := serveOnce(t, h)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("code = %d, want 502", rec.Code)
+	}
+	if d := time.Since(start); d > 6*time.Second {
+		t.Errorf("took %v, want a dial timeout of about 3s", d)
 	}
 }
 
@@ -344,7 +447,7 @@ func TestHostMode_LocationUpgradedToHTTPS(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 	req.Host = "test.example.com"
-	req.Header.Set("X-Forwarded-Proto", "https")
+	req.TLS = &tls.ConnectionState{} // client connected over HTTPS
 	h.ServeHTTP(rec, req)
 	if loc := rec.Header().Get("Location"); loc != "https://test.example.com/newpath" {
 		t.Errorf("Location: got %q, want https://test.example.com/newpath", loc)

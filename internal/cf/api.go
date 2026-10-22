@@ -87,8 +87,15 @@ type dnsRecord struct {
 
 // ingressRule is a cloudflared tunnel ingress entry.
 type ingressRule struct {
-	Hostname string `json:"hostname,omitempty"`
-	Service  string `json:"service"`
+	Hostname      string         `json:"hostname,omitempty"`
+	Service       string         `json:"service"`
+	OriginRequest *originRequest `json:"originRequest,omitempty"`
+}
+
+// originRequest holds the per-rule cloudflared connection settings we use.
+type originRequest struct {
+	NoTLSVerify      bool   `json:"noTLSVerify,omitempty"`
+	OriginServerName string `json:"originServerName,omitempty"`
 }
 
 type tunnelConfigResult struct {
