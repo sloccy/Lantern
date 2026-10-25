@@ -16,10 +16,15 @@ const vendorFiles = [
 
 fs.mkdirSync(vendorDest, { recursive: true });
 
+// The .map files are not shipped, so drop the trailing sourceMappingURL comment;
+// otherwise DevTools logs a failed source-map fetch for every vendored file.
+const sourceMapComment = /(?:\/\*#\s*sourceMappingURL=[^*]*\*\/|\/\/#\s*sourceMappingURL=\S*)\s*$/;
+
 for (const [src, name] of vendorFiles) {
   const from = path.join(root, src);
   const to   = path.join(vendorDest, name);
-  fs.copyFileSync(from, to);
+  const text = fs.readFileSync(from, 'utf8').replace(sourceMapComment, '');
+  fs.writeFileSync(to, text);
   const size = fs.statSync(to).size;
   console.log(`  vendor/${name}: ${size} bytes`);
 }

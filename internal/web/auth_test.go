@@ -195,3 +195,12 @@ func TestReservedSubdomainRejected(t *testing.T) {
 		t.Error("reserved subdomain was stored")
 	}
 }
+
+// The login button must use the app's amber primary style, not Bootstrap's blue.
+func TestLoginPage_UsesThemedButton(t *testing.T) {
+	s := newAuthTestServer(t, "secret")
+	body := do(s, http.MethodGet, "/login", nil, nil).Body.String()
+	if !strings.Contains(body, "btn-warning") || strings.Contains(body, "btn-primary") {
+		t.Errorf("login button should use btn-warning (theme), not btn-primary")
+	}
+}

@@ -28,6 +28,16 @@ var (
 	commit  = "unknown"
 )
 
+// assetVersion is the cache-busting value for static asset URLs (?v=...). Static
+// files are cached as immutable, so untagged builds (version "dev") get the commit
+// appended; otherwise browsers would keep old CSS/JS across deploys.
+func assetVersion(version, commit string) string {
+	if version == "dev" && commit != "unknown" && len(commit) >= 7 {
+		return "dev-" + commit[:7]
+	}
+	return version
+}
+
 func main() {
 	// Healthcheck subcommand for container health probes.
 	// Distroless images have no shell or wget, so the binary handles its own check.
@@ -98,7 +108,7 @@ func main() {
 	}
 
 	// Web server (serves GUI + REST API).
-	webSrv := web.New(cfg, st, cfClient, version)
+	webSrv := web.New(cfg, st, cfClient, assetVersion(version, commit))
 
 	// Proxy handler (routes by subdomain).
 	proxyHandler := proxy.New(cfg, st, webSrv)
