@@ -156,7 +156,7 @@ func main() {
 	// HTTPS server.
 	tlsCfg := &tls.Config{
 		GetCertificate: certMgr.GetCertificate,
-		MinVersion:     tls.VersionTLS12,
+		MinVersion:     tls.VersionTLS13,
 	}
 	httpsSrv := &http.Server{
 		Addr:              ":443",
