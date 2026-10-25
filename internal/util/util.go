@@ -23,6 +23,13 @@ func NewID() string {
 // lowercase, spaces/underscores/dots replaced with hyphens, all other
 // non-alphanumeric characters stripped, leading/trailing hyphens removed.
 // Returns "service" if the result would be empty.
+// IsReservedSubdomain reports whether a subdomain is used by Lantern itself.
+// "lantern" serves the admin UI, so a service must never claim it (a tunnelled
+// service on that name would expose the admin UI publicly).
+func IsReservedSubdomain(sub string) bool {
+	return strings.EqualFold(sub, "lantern")
+}
+
 func SanitiseSubdomain(name string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
 	var b strings.Builder

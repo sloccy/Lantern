@@ -35,6 +35,12 @@ func (h *Handler) trustedPeer(r *http.Request) bool {
 	return false
 }
 
+// viaTunnel reports whether the request came through the Cloudflare tunnel
+// (a trusted peer that vouches for a public client via CF-Connecting-IP).
+func (h *Handler) viaTunnel(r *http.Request) bool {
+	return h.trustedPeer(r) && r.Header.Get("Cf-Connecting-Ip") != ""
+}
+
 // clientIP is the address of the real client: the peer itself, unless the peer
 // is trusted and says who is behind it (Cloudflare's CF-Connecting-IP, or the
 // first X-Forwarded-For entry).

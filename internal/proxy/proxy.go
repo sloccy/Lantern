@@ -157,6 +157,12 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 		if s := h.store.GetServiceBySubdomain(sub); s != nil {
 			svcName = s.Name
 		}
+		if h.viaTunnel(r) {
+			// Public visitors must not see internal addresses from dial errors.
+			log.Printf("proxy: %q: %v", sub, err) //nolint:gosec // %q escapes the host-derived subdomain
+			h.errorPage(w, 502, "This service is currently unavailable.")
+			return
+		}
 		msg := fmt.Sprintf("Could not reach <strong>%s</strong>.<br><small>%s</small>",
 			html.EscapeString(svcName), html.EscapeString(err.Error()))
 		h.errorPage(w, 502, msg)

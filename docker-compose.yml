@@ -37,6 +37,10 @@ services:
       # Your root domain. Wildcard cert will cover *.yourdomain.com
       DOMAIN: ""
 
+      # Password for the management UI and write APIs (the homepage stays open).
+      # Leave unset only on a network you fully trust.
+      # ADMIN_PASSWORD: ""
+
       # Cloudflare API token with Zone:DNS:Edit permission for your zone.
       CF_API_TOKEN: ""
 

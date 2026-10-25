@@ -26,6 +26,9 @@ type Config struct {
 	TrustedProxies []*net.IPNet
 	Compression    bool // gzip compressible proxied responses (COMPRESSION=false disables)
 	LogRequests    bool // one log line per proxied request (LOG_REQUESTS=true)
+
+	// AdminPassword protects the management UI and write APIs. Empty disables login.
+	AdminPassword string
 }
 
 func Load() (*Config, error) {
@@ -66,6 +69,7 @@ func Load() (*Config, error) {
 		TrustedProxies: trusted,
 		Compression:    os.Getenv("COMPRESSION") != "false",
 		LogRequests:    os.Getenv("LOG_REQUESTS") == "true",
+		AdminPassword:  os.Getenv("ADMIN_PASSWORD"),
 	}
 	return cfg, nil
 }

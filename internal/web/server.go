@@ -39,6 +39,7 @@ type Server struct {
 	health       map[string]string // service ID → "up" | "down"
 	healthSem    chan struct{}     // limits concurrent health-check goroutines; allocated once
 	faviconCache *ttlCache[faviconEntry]
+	auth         *authenticator
 }
 
 func New(cfg *config.Config, st *store.Store, cfClient *cf.Client, version string) *Server {
@@ -46,10 +47,13 @@ func New(cfg *config.Config, st *store.Store, cfClient *cf.Client, version strin
 		cfg: cfg, store: st, cf: cfClient, version: version,
 		healthSem:    make(chan struct{}, healthConcurrency),
 		faviconCache: newTTLCache[faviconEntry](100),
+		auth:         newAuthenticator(cfg.AdminPassword, cfg.DataDir),
 	}
 	s.mux = http.NewServeMux()
 	s.routes()
-	s.handler = gzipHandler(securityHeaders(s.mux))
+	// Order matters: cross-origin writes are rejected before anything else,
+	// then login is enforced (when ADMIN_PASSWORD is set).
+	s.handler = gzipHandler(securityHeaders(http.NewCrossOriginProtection().Handler(s.auth.middleware(s.mux))))
 	return s
 }
 
@@ -119,11 +123,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 
+// contentSecurityPolicy for the Lantern UI. script-src keeps 'unsafe-inline'
+// and 'unsafe-eval' because the templates use an inline <script>, onclick, and
+// htmx hx-on handlers; tightening needs those moved into app.js.
+const contentSecurityPolicy = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+	"script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self'; object-src 'none'; " +
+	"base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "SAMEORIGIN")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// HSTS without includeSubDomains: proxied internal services may be plain HTTP.
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -213,8 +227,13 @@ func (s *Server) routes() {
 		})
 	})
 	s.mux.HandleFunc("GET /manage", func(w http.ResponseWriter, r *http.Request) {
-		renderPage(w, manageTmpl, pageData{Version: s.version})
+		renderPage(w, manageTmpl, pageData{Version: s.version, AuthEnabled: s.auth.enabled})
 	})
+
+	// Login / logout (no-ops when ADMIN_PASSWORD is unset).
+	s.mux.HandleFunc("GET /login", s.loginPage)
+	s.mux.HandleFunc("POST /login", s.login)
+	s.mux.HandleFunc("POST /logout", s.logout)
 
 	// Fragment endpoints — return HTML for htmx.
 	s.mux.HandleFunc("GET /fragments/services", s.fragServicesGrid)

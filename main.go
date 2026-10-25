@@ -58,6 +58,10 @@ func main() {
 		log.Println("WARNING: DOMAIN not set — TLS cert provisioning and DNS management will not work")
 	}
 
+	if cfg.AdminPassword == "" {
+		log.Println("WARNING: ADMIN_PASSWORD not set — the management UI and API are open to anyone who can reach this host")
+	}
+
 	// Persistent store.
 	st, err := store.New(cfg.DataDir)
 	if err != nil {

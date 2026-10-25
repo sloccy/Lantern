@@ -567,3 +567,32 @@ func TestHostMode_WebSocketFallsBackToBackend(t *testing.T) {
 		t.Errorf("second upgrade: status %d, want 101", got)
 	}
 }
+
+// Tunnel (public) visitors get a generic 502; LAN visitors keep the detail.
+func TestErrorPage_HidesBackendDetailFromTunnelVisitors(t *testing.T) {
+	st := newTestStore(t)
+	addSvc(st, "http://127.0.0.1:1", "client") // nothing listens: connection refused
+	h := newTestHandler(t, st, nil)
+
+	do := func(remote, cfIP string) string {
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+		req.Host = "test.example.com"
+		req.RemoteAddr = remote
+		if cfIP != "" {
+			req.Header.Set("Cf-Connecting-Ip", cfIP)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("code = %d, want 502", rec.Code)
+		}
+		return rec.Body.String()
+	}
+
+	if body := do("127.0.0.1:5555", "203.0.113.9"); strings.Contains(body, "127.0.0.1:1") {
+		t.Errorf("tunnel visitor saw backend address: %s", body)
+	}
+	if body := do("192.168.1.20:5555", ""); !strings.Contains(body, "127.0.0.1:1") {
+		t.Errorf("LAN visitor should see the dial error, got: %s", body)
+	}
+}

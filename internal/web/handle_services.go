@@ -69,6 +69,10 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 			errorResponse(w, http.StatusBadRequest, "subdomain is required")
 			return
 		}
+		if util.IsReservedSubdomain(req.Subdomain) {
+			errorResponse(w, http.StatusBadRequest, "subdomain is reserved")
+			return
+		}
 		if s.store.GetServiceBySubdomain(req.Subdomain) != nil {
 			errorResponse(w, http.StatusConflict, "subdomain already assigned")
 			return
@@ -470,6 +474,10 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 		newSub = util.SanitiseSubdomain(req.Subdomain)
 		if newSub == "" {
 			newSub = oldSub
+		}
+		if util.IsReservedSubdomain(newSub) {
+			errorResponse(w, http.StatusBadRequest, "subdomain is reserved")
+			return
 		}
 	}
 

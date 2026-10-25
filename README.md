@@ -191,6 +191,18 @@ All configuration is via environment variables.
 | `TRUSTED_PROXIES` | — | Comma-separated IPs/CIDRs (e.g. `10.0.0.0/8`) of another proxy in front of Lantern whose `X-Forwarded-*` headers should be believed. Loopback is always trusted. |
 | `COMPRESSION` | `true` | gzip-compress text/JSON/etc. responses that the backend didn't already compress. Set `false` to disable. |
 | `LOG_REQUESTS` | `false` | Log one line per proxied request (service, path, status, duration, Host mode). |
+| `ADMIN_PASSWORD` | — | Password for the management UI and all write APIs. The read-only homepage stays open. Unset = no login (a warning is logged at startup). |
+
+---
+
+## Security
+
+- **Admin login.** Set `ADMIN_PASSWORD` to require a password for `/manage` and every API that changes something. The read-only homepage (service grid, bookmarks, system stats) stays open on your LAN. Sessions last 30 days and survive restarts (the signing key is `session.key` in the data directory; delete it to log everyone out). Failed logins are limited to about one per second. Without a password, anyone who can reach `lantern.DOMAIN` can edit services and publish them through the tunnel.
+- **Cross-site requests are blocked.** Writes whose `Sec-Fetch-Site`/`Origin` show they came from another website are rejected, so a malicious page open on your LAN can't drive the UI.
+- **`lantern` is a reserved subdomain.** It serves the admin UI, so a service can't claim it (otherwise tunnelling it would publish the UI).
+- **TLS 1.3 only** on the HTTPS listener, plus HSTS and a Content-Security-Policy on the Lantern UI.
+- **Tunnelled services are public.** Lantern doesn't add authentication to them; rely on the app's own login, or put a [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) policy in front of anything sensitive. Visitors arriving through the tunnel see a generic error page instead of backend addresses.
+- **The Docker socket is powerful.** Mounting it `:ro` only makes the socket file read-only; it does not limit what the Docker API allows. Anyone who compromises the container can effectively control the host. If that worries you, don't mount the socket and add services manually.
 
 ---
 

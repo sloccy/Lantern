@@ -11,7 +11,10 @@
     <span class="logo-text">Lantern</span>
     <span class="badge text-bg-warning">Manage</span>
   </div>
-  <a href="/" class="btn btn-link">← Home</a>
+  <div class="d-flex align-items-center gap-2">
+    <a href="/" class="btn btn-link">← Home</a>
+    {{if .AuthEnabled}}<form method="post" action="/logout" class="m-0"><button type="submit" class="btn btn-sm btn-outline-secondary">Log out</button></form>{{end}}
+  </div>
 </header>
 
 <main class="manage-main">

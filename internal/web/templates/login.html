@@ -1,0 +1,20 @@
+{{template "base" .}}
+
+{{define "title"}}Lantern – Login{{end}}
+
+{{define "content"}}
+<main class="d-flex align-items-center justify-content-center min-vh-100 p-3">
+  <form method="post" action="/login" class="card p-4 col-12 col-sm-8 col-md-5 col-lg-3">
+    <div class="logo mb-3">
+      <img src="/logo.webp" class="logo-img" alt="Lantern">
+      <span class="logo-text">Lantern</span>
+    </div>
+    {{if .LoginError}}<div class="alert alert-danger py-2" role="alert">{{.LoginError}}</div>{{end}}
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label for="password" class="form-label">Admin password</label>
+    <input type="password" id="password" name="password" class="form-control mb-3"
+           autocomplete="current-password" required autofocus>
+    <button type="submit" class="btn btn-primary">Sign in</button>
+  </form>
+</main>
+{{end}}

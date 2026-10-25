@@ -27,6 +27,7 @@ var templateFS embed.FS
 var tmpl *template.Template
 var indexTmpl *template.Template
 var manageTmpl *template.Template
+var loginTmpl *template.Template
 
 func init() {
 	entries, err := fs.ReadDir(templateFS, "templates/partials")
@@ -44,6 +45,8 @@ func init() {
 		"templates/base.html", "templates/index.html"))
 	manageTmpl = template.Must(template.New("").Funcs(funcMap).ParseFS(templateFS,
 		"templates/base.html", "templates/manage.html"))
+	loginTmpl = template.Must(template.New("").Funcs(funcMap).ParseFS(templateFS,
+		"templates/base.html", "templates/login.html"))
 }
 
 func renderTemplate(w http.ResponseWriter, name string, data any) {
@@ -63,6 +66,9 @@ type pageData struct {
 	Version       string
 	ServicesHTML  template.HTML
 	BookmarksHTML template.HTML
+	AuthEnabled   bool   // show Logout on the manage page
+	Next          string // login: where to go after signing in
+	LoginError    string // login: message shown above the form
 }
 
 func renderPage(w http.ResponseWriter, t *template.Template, data pageData) {

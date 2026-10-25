@@ -174,6 +174,10 @@ func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name str
 	if info == nil {
 		return // no usable port/target
 	}
+	if util.IsReservedSubdomain(info.subdomain) {
+		log.Printf("discovery: skipping %q: subdomain %q is reserved for Lantern", name, info.subdomain)
+		return
+	}
 
 	// Reattach: same container name as an existing docker service (e.g. restart/recreate).
 	if existing := d.store.GetServiceByContainerName(name); existing != nil {
