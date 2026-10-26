@@ -7,6 +7,7 @@ require (
 	github.com/miekg/dns v1.1.72
 	github.com/moby/moby/api v1.54.2
 	github.com/moby/moby/client v0.4.1
+	golang.org/x/crypto v0.53.0
 	golang.org/x/sync v0.21.0
 )
 
@@ -33,7 +34,6 @@ require (
 	go.opentelemetry.io/otel/sdk v1.45.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.45.0 // indirect
 	go.opentelemetry.io/otel/trace v1.45.0 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect

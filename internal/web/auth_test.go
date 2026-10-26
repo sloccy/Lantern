@@ -140,16 +140,33 @@ func TestAuth_SessionKeyPersists(t *testing.T) {
 
 func TestAuth_SafeNext(t *testing.T) {
 	for in, want := range map[string]string{
+		"/":                "/",
 		"/manage":          "/manage",
-		"/a?b=c":           "/a?b=c",
+		"/manage?x=1":      "/", // only exact allowlist entries survive
 		"//evil.com":       "/",
 		"/\\evil.com":      "/",
+		"/\t/evil.com":     "/", // browsers strip the tab, leaving //evil.com
 		"https://evil.com": "/",
 		"":                 "/",
 	} {
 		if got := safeNext(in); got != want {
 			t.Errorf("safeNext(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestAuth_CheckPassword(t *testing.T) {
+	a := newAuthenticator("secret", t.TempDir())
+
+	if ok, tooSoon := a.checkPassword("wrong"); ok || tooSoon {
+		t.Errorf("wrong password = (ok %v, tooSoon %v), want (false, false)", ok, tooSoon)
+	}
+	if _, tooSoon := a.checkPassword("secret"); !tooSoon {
+		t.Error("attempt right after a failure should be throttled")
+	}
+	a.lastFail = time.Time{}
+	if ok, _ := a.checkPassword("secret"); !ok {
+		t.Error("right password rejected")
 	}
 }
 
