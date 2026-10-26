@@ -15,19 +15,31 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/argon2"
 )
 
 const (
 	sessionCookie  = "__Host-lantern_session" // __Host- prefix: Secure, Path=/, no Domain, never sent to subdomains
 	sessionTTL     = 30 * 24 * time.Hour
 	loginRetryWait = time.Second // minimum gap after a failed login attempt
+
+	// argon2id parameters, RFC 9106's second recommended option. One derivation
+	// happens at startup and one per login attempt, which the loginRetryWait
+	// throttle already caps at roughly one per second.
+	argonTime    = 3
+	argonMemory  = 64 * 1024 // KiB
+	argonThreads = 4
+	argonKeyLen  = 32
+	argonSaltLen = 16
 )
 
 // authenticator guards the management UI and write APIs with a single shared
 // admin password. It is disabled (all requests allowed) when no password is set.
 type authenticator struct {
 	enabled  bool
-	pwHash   [sha256.Size]byte
+	pwHash   []byte // argon2id derivation of the admin password
+	pwSalt   []byte // random per process: the password is re-supplied on every boot
 	key      []byte // HMAC key for session tokens
 	mu       sync.Mutex
 	lastFail time.Time
@@ -41,7 +53,11 @@ func newAuthenticator(password, dataDir string) *authenticator {
 		return a
 	}
 	a.enabled = true
-	a.pwHash = sha256.Sum256([]byte(password))
+	a.pwSalt = make([]byte, argonSaltLen)
+	if _, err := rand.Read(a.pwSalt); err != nil {
+		log.Fatalf("web: generate password salt: %v", err)
+	}
+	a.pwHash = a.derive(password)
 	a.key = loadSessionKey(dataDir)
 	return a
 }
@@ -59,6 +75,11 @@ func loadSessionKey(dataDir string) []byte {
 		log.Printf("web: could not persist session key (%v); logins will reset on restart", err)
 	}
 	return key
+}
+
+// derive runs the password through argon2id with this process's salt.
+func (a *authenticator) derive(password string) []byte {
+	return argon2.IDKey([]byte(password), a.pwSalt, argonTime, argonMemory, argonThreads, argonKeyLen)
 }
 
 func (a *authenticator) sign(payload string) string {
@@ -97,8 +118,7 @@ func (a *authenticator) checkPassword(pw string) (ok, tooSoon bool) {
 	if time.Since(a.lastFail) < loginRetryWait {
 		return false, true
 	}
-	got := sha256.Sum256([]byte(pw))
-	if subtle.ConstantTimeCompare(got[:], a.pwHash[:]) == 1 {
+	if subtle.ConstantTimeCompare(a.derive(pw), a.pwHash) == 1 {
 		return true, false
 	}
 	a.lastFail = time.Now()
@@ -144,24 +164,33 @@ func (a *authenticator) middleware(next http.Handler) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/api/"):
 			apiError(w, http.StatusUnauthorized, "login required")
 		case r.Method == http.MethodGet:
-			http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusSeeOther)
+			http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
 		default:
 			http.Error(w, "login required", http.StatusUnauthorized)
 		}
 	})
 }
 
-// safeNext returns next only if it is a same-site relative path, else "/".
+// nextTargets is the allowlist of pages a post-login redirect may land on.
+// safeNext returns a literal from this map and never the caller's own string, so
+// a crafted ?next= cannot steer the browser off-site. A new page behind the
+// login has to be added here to be a valid redirect target.
+var nextTargets = map[string]string{
+	"/":       "/",
+	"/manage": "/manage",
+}
+
+// safeNext maps next onto a known in-app page, falling back to the dashboard.
 func safeNext(next string) string {
-	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
-		return "/"
+	if p, ok := nextTargets[next]; ok {
+		return p
 	}
-	return next
+	return "/"
 }
 
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	if !s.auth.enabled || s.auth.authenticated(r) {
-		http.Redirect(w, r, safeNext(r.URL.Query().Get("next")), http.StatusSeeOther) //nolint:gosec // safeNext only returns same-site relative paths
+		http.Redirect(w, r, safeNext(r.URL.Query().Get("next")), http.StatusSeeOther) //nolint:gosec // safeNext only returns a literal from the nextTargets allowlist
 		return
 	}
 	renderPage(w, loginTmpl, pageData{Version: s.version, Next: safeNext(r.URL.Query().Get("next"))})
@@ -194,7 +223,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		Name: sessionCookie, Value: s.auth.newToken(expires), Path: "/",
 		Expires: expires, HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
-	http.Redirect(w, r, next, http.StatusSeeOther) //nolint:gosec // next went through safeNext (same-site relative path only)
+	http.Redirect(w, r, next, http.StatusSeeOther) //nolint:gosec // next went through safeNext (a literal from the nextTargets allowlist)
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
