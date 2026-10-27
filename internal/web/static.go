@@ -115,6 +115,20 @@ func serveStaticFiles(mux *http.ServeMux) {
 	}))
 }
 
+// iconCSP neutralises active content in stored icon bytes. SVG is a document
+// type, so without this a top-level visit to /api/icons/<id> would run inline
+// script on Lantern's own origin under the site CSP's 'unsafe-inline'. It does
+// not affect icons rendered in <img>, which never execute script.
+const iconCSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+
+// writeIconHeaders sets the headers every icon response needs, including the
+// restrictive CSP that overrides the site-wide one from securityHeaders.
+func writeIconHeaders(w http.ResponseWriter, contentType, cacheControl string) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Security-Policy", iconCSP)
+	w.Header().Set("Cache-Control", cacheControl)
+}
+
 // detectIconContentType returns the MIME type of icon data.
 // Go's http.DetectContentType does not recognise SVG, so we check for that
 // explicitly before falling back to the standard sniffer. Non-image types are
@@ -151,8 +165,7 @@ func (s *Server) getFavicon(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", e.contentType)
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		writeIconHeaders(w, e.contentType, "public, max-age=3600")
 		_, _ = w.Write(e.data)
 		return
 	}
@@ -168,8 +181,7 @@ func (s *Server) getFavicon(w http.ResponseWriter, r *http.Request) {
 	if data, err := s.store.ReadIcon(id); err == nil && len(data) > 0 {
 		ct := detectIconContentType(data)
 		s.faviconCache.Set(id, faviconEntry{data: data, contentType: ct}, time.Hour)
-		w.Header().Set("Content-Type", ct)
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		writeIconHeaders(w, ct, "public, max-age=3600")
 		_, _ = w.Write(data) //nolint:gosec // binary icon data, not HTML; Content-Type is set explicitly
 		return
 	}
@@ -187,8 +199,7 @@ func (s *Server) getFavicon(w http.ResponseWriter, r *http.Request) {
 	s.faviconCache.Set(id, faviconEntry{data: data, contentType: ct}, time.Hour)
 	_ = s.store.WriteIcon(id, data) // persist for next restart
 
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "public, max-age=3600")
+	writeIconHeaders(w, ct, "public, max-age=3600")
 	_, _ = w.Write(data) //nolint:gosec // binary icon data, not HTML; Content-Type is set explicitly
 }
 
@@ -224,8 +235,7 @@ func (s *Server) getIcon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ct := detectIconContentType(data)
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")
+	writeIconHeaders(w, ct, "public, max-age=3600, must-revalidate")
 	w.Header().Set("ETag", etag)
 	_, _ = w.Write(data) //nolint:gosec // binary icon data, not HTML; Content-Type is set explicitly
 }
