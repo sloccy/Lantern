@@ -6,8 +6,8 @@ on:
     tags: ["v*.*.*"]
   pull_request:
     branches: [main, master]
-  # Rebuilds with no code change (new base image, Go toolchain, cloudflared) are
-  # dispatched weekly by security.yml.
+  # Every image build is a full no-cache rebuild (fresh base images, packages and
+  # cloudflared). security.yml dispatches one weekly so they refresh without a code change.
   workflow_dispatch:
 
 env:
@@ -112,29 +112,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Date stamp passed to the Dockerfile so the cached cloudflared download
-      # layer is refreshed on each new date instead of being reused forever.
-      - name: Date stamp
-        if: github.event_name != 'pull_request'
-        id: stamp
-        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
-
       - name: Build and push by digest
         if: github.event_name != 'pull_request'
         id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          pull: true  # always check for a newer base image than the cached one
+          pull: true  # always pull base images fresh
+          no-cache: true  # rebuild every layer: apt packages, modules, cloudflared
           platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=linux-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=linux-${{ matrix.arch }}
           build-args: |
             BUILD_VERSION=${{ github.ref_type == 'tag' && github.ref_name || 'dev' }}
             BUILD_COMMIT=${{ github.sha }}
-            CLOUDFLARED_REFRESH=${{ steps.stamp.outputs.date }}
 
       - name: Export digest
         if: github.event_name != 'pull_request'
