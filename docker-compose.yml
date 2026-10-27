@@ -38,8 +38,9 @@ services:
       DOMAIN: ""
 
       # Password for the management UI and write APIs (the homepage stays open).
-      # Leave unset only on a network you fully trust.
-      # ADMIN_PASSWORD: ""
+      # Leave empty only on a network you fully trust: without it, anyone who
+      # can reach this host can add services and publish them through the tunnel.
+      ADMIN_PASSWORD: ""
 
       # Cloudflare API token with Zone:DNS:Edit permission for your zone.
       CF_API_TOKEN: ""

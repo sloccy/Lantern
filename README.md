@@ -107,6 +107,10 @@ services:
       # Once set, use Manage → Cloudflare Tunnel in the UI.
       # CF_ACCOUNT_ID: ""
 
+      # Password for the management UI and write APIs (the homepage stays open).
+      # Leave empty only on a network you fully trust.
+      ADMIN_PASSWORD: ""
+
       # Where to store config, certs, and ACME keys inside the container.
       DATA_DIR: /data
 
@@ -140,7 +144,7 @@ To route services through a Cloudflare Zero Trust tunnel instead of exposing por
 
 `SERVER_IP` is optional in tunnel mode — no A records are created for tunneled services.
 
-Tunnel traffic is sent to Lantern's own HTTPS listener (`https://localhost:443`, inside the container) and then proxied to the service, so tunneled and LAN requests behave identically. Lantern re-asserts the tunnel routes and DNS records for every service every 5 minutes, which also migrates routes created by older versions. The real visitor address is read from Cloudflare's `CF-Connecting-IP` header, but only for connections from loopback (where `cloudflared` runs) or from `TRUSTED_PROXIES`.
+Tunnel traffic is sent to Lantern's own HTTPS listener (`https://localhost:443`, inside the container) and then proxied to the service, so tunneled and LAN requests behave identically. Lantern re-asserts the tunnel routes and DNS records for every service every 5 minutes, which also migrates routes created by older versions. The real visitor address is read from Cloudflare's `CF-Connecting-IP` header, but only for connections from loopback (where `cloudflared` runs) or from `TRUSTED_PROXIES`. Identity headers from anyone else are a claim the client made about itself, so they are stripped before the backend sees them: the `CF-*` family (including `CF-Access-Authenticated-User-Email` and `CF-Access-JWT-Assertion`), `True-Client-IP`, and the forward-auth headers `Remote-User`, `Remote-Groups`, `X-Forwarded-User` and `X-Authenticated-User`. In an `X-Forwarded-For` chain from a trusted peer, the rightmost hop that isn't itself trusted is the one believed — proxies append, so the leftmost entry is whatever the client sent.
 
 ### Bridge networking fallback
 
@@ -234,6 +238,12 @@ services:
 2. `lantern.port` — use this port on `SERVER_IP`
 3. `traefik.http.services.<n>.loadbalancer.server.port` — Traefik label compatibility
 4. Published port fallback — any published TCP port
+
+> **Labels set a target, they don't move one.** When a container reattaches to a service that
+> already exists, its labels may change the *port* but not the *host* — a restarted container
+> republishing on a new port keeps working, while a label (including one baked into a third-party
+> image) cannot repoint a live subdomain at somewhere else. Change the host in **Manage** instead;
+> the refusal is logged.
 
 **Traefik label compatibility** — if your containers already have Traefik labels, Lantern reads them automatically:
 

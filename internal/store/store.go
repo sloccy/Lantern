@@ -261,10 +261,6 @@ func (s *Store) SaveLog(ctx string) {
 
 // ---- Icon file storage ------------------------------------------------------
 
-func (s *Store) iconPath(id string) string {
-	return filepath.Join(s.iconDir, id)
-}
-
 // safeIconPath returns the icon file path for id after validating that id is a
 // clean, single-component name that stays within iconDir. This prevents path
 // traversal even if callers forget to validate the id themselves.
@@ -307,28 +303,35 @@ func (s *Store) DeleteIcon(id string) {
 // files and clears the field. Called once at startup after loading the JSON store.
 func (s *Store) migrateIcons() {
 	migrated := 0
+	// safeIconPath, not iconPath: the IDs come from the on-disk JSON, so they
+	// are validated like any other caller's before being joined onto a path.
+	migrate := func(id, icon string) bool {
+		if !strings.HasPrefix(icon, "data:") {
+			return false
+		}
+		p, err := s.safeIconPath(id)
+		if err != nil {
+			log.Printf("store: skipping icon migration for %q: %v", id, err)
+			return false
+		}
+		return writeDataURI(p, icon)
+	}
 	for _, svc := range s.d.Services {
-		if strings.HasPrefix(svc.Icon, "data:") {
-			if writeDataURI(s.iconPath(svc.ID), svc.Icon) {
-				svc.Icon = IconFile
-				migrated++
-			}
+		if migrate(svc.ID, svc.Icon) {
+			svc.Icon = IconFile
+			migrated++
 		}
 	}
 	for _, bm := range s.d.Bookmarks {
-		if strings.HasPrefix(bm.Icon, "data:") {
-			if writeDataURI(s.iconPath(bm.ID), bm.Icon) {
-				bm.Icon = IconFile
-				migrated++
-			}
+		if migrate(bm.ID, bm.Icon) {
+			bm.Icon = IconFile
+			migrated++
 		}
 	}
 	for _, d := range s.d.Discovered {
-		if strings.HasPrefix(d.Icon, "data:") {
-			if writeDataURI(s.iconPath(d.ID), d.Icon) {
-				d.Icon = IconFile
-				migrated++
-			}
+		if migrate(d.ID, d.Icon) {
+			d.Icon = IconFile
+			migrated++
 		}
 	}
 	if migrated > 0 {
