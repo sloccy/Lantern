@@ -21,6 +21,19 @@ import (
 // insecureTransport talks to backends. Timeouts and keep-alive mirror Caddy's
 // reverse_proxy defaults: a dead backend fails in 3s with the 502 page rather
 // than hanging on the OS connect timeout.
+// untrustedInboundHeaders are identity headers a backend may authenticate on:
+// who the visitor is, where they came from, whether Cloudflare Access already
+// vetted them. They mean something only from a trusted peer (the tunnel on
+// loopback, or a TRUSTED_PROXIES front end); from anyone else they are a claim
+// the client made about itself, so they are stripped before the backend sees
+// them.
+var untrustedInboundHeaders = []string{
+	"Cf-Connecting-Ip", "Cf-Ipcountry", "Cf-Ray", "Cf-Visitor",
+	"Cf-Access-Authenticated-User-Email", "Cf-Access-Jwt-Assertion", "Cf-Access-Client-Id",
+	"True-Client-Ip", "X-Forwarded-User", "X-Authenticated-User", "Remote-User", "Remote-Groups",
+	"X-Forwarded-Server",
+}
+
 var insecureTransport = &http.Transport{
 	TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // intentional for backend self-signed certs
 	DialContext:         (&net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
@@ -106,6 +119,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub string) {
+	// "_" never appears in a subdomain we generate from user input, but it does
+	// in the synthetic "_direct_<id>" key used for services with no subdomain —
+	// and it is a legal Host header byte, so the key would otherwise be
+	// routable by anyone who reads an ID off the dashboard.
+	if sub == "" || strings.HasPrefix(sub, "_") {
+		http.NotFound(w, r)
+		return
+	}
 	svc := h.store.GetServiceBySubdomain(sub)
 	if svc == nil {
 		h.proxies.Delete(sub) // evict stale cache entries if service was deleted
@@ -185,7 +206,9 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 		pr.Out.Header.Set("X-Real-IP", ip)
 		pr.Out.Header.Set("X-Forwarded-Proto", h.forwardedProto(pr.In))
 		if !h.trustedPeer(pr.In) {
-			pr.Out.Header.Del("Cf-Connecting-Ip")
+			for _, k := range untrustedInboundHeaders {
+				pr.Out.Header.Del(k)
+			}
 		}
 	}
 	// Keep Location headers on the public site: a redirect to the backend's own

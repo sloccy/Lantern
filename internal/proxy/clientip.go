@@ -21,9 +21,12 @@ func peerIP(r *http.Request) string {
 // LAN client can't spoof its address.
 func (h *Handler) trustedPeer(r *http.Request) bool {
 	ip := net.ParseIP(peerIP(r))
-	if ip == nil {
-		return false
-	}
+	return ip != nil && h.trustedIP(ip)
+}
+
+// trustedIP reports whether ip is one of ours: loopback, or inside a
+// configured TRUSTED_PROXIES range.
+func (h *Handler) trustedIP(ip net.IP) bool {
 	if ip.IsLoopback() {
 		return true
 	}
@@ -43,17 +46,37 @@ func (h *Handler) viaTunnel(r *http.Request) bool {
 
 // clientIP is the address of the real client: the peer itself, unless the peer
 // is trusted and says who is behind it (Cloudflare's CF-Connecting-IP, or the
-// first X-Forwarded-For entry).
+// X-Forwarded-For chain).
 func (h *Handler) clientIP(r *http.Request) string {
 	if h.trustedPeer(r) {
-		if v := strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip")); v != "" {
-			return v
+		if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip"))); ip != nil {
+			return ip.String()
 		}
-		if v := r.Header.Get("X-Forwarded-For"); v != "" {
-			return strings.TrimSpace(strings.SplitN(v, ",", 2)[0])
+		if v := h.rightmostUntrusted(r.Header.Get("X-Forwarded-For")); v != "" {
+			return v
 		}
 	}
 	return peerIP(r)
+}
+
+// rightmostUntrusted returns the last address in an X-Forwarded-For chain that
+// we did not put there ourselves. Proxies append, so the leftmost entry is
+// whatever the client sent and is worthless; walking in from the right past our
+// own trusted hops lands on the first address nobody we trust vouched for.
+// Returns "" when the header is empty, unparseable, or entirely ours.
+func (h *Handler) rightmostUntrusted(xff string) string {
+	if xff == "" {
+		return ""
+	}
+	parts := strings.Split(xff, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip := net.ParseIP(strings.TrimSpace(parts[i]))
+		if ip == nil || h.trustedIP(ip) {
+			continue
+		}
+		return ip.String()
+	}
+	return ""
 }
 
 // forwardedProto is the scheme the client used: taken from a trusted peer's

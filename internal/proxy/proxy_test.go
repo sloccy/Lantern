@@ -164,7 +164,9 @@ func TestForwardedHeaders_TrustMatrix(t *testing.T) {
 	}{
 		{"untrusted peer cannot spoof", "203.0.113.9:4000", "6.6.6.6", "7.7.7.7", "https", "8.8.8.8", "203.0.113.9", "http", false},
 		{"loopback tunnel uses CF-Connecting-IP", "127.0.0.1:4000", "198.51.100.7", "", "https", "", "198.51.100.7", "https", true},
-		{"loopback falls back to XFF", "[::1]:4000", "", "198.51.100.8, 10.0.0.1", "", "", "198.51.100.8", "http", false},
+		// Proxies append, so the rightmost entry we did not add ourselves is the
+		// only one that means anything; the leftmost is whatever the client sent.
+		{"loopback falls back to XFF", "[::1]:4000", "", "198.51.100.8, 10.0.0.1", "", "", "10.0.0.1", "http", false},
 		{"loopback without headers", "127.0.0.1:4000", "", "", "", "", "127.0.0.1", "http", false},
 	}
 	for _, tt := range tests {
@@ -216,6 +218,97 @@ func TestForwardedHeaders_ConfiguredTrustedProxy(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if v := got.Get("X-Real-IP"); v != "198.51.100.1" {
 		t.Errorf("X-Real-IP = %q, want 198.51.100.1", v)
+	}
+}
+
+// A client that prepends its own X-Forwarded-For entry must not be able to
+// choose the address the backend sees: the front proxy appends the real one.
+func TestForwardedHeaders_SpoofedXFFPrefixIgnored(t *testing.T) {
+	tests := []struct {
+		name, xff, want string
+	}{
+		{"spoofed prefix ignored", "10.0.0.5, 198.51.100.9", "198.51.100.9"},
+		{"chain past our own proxies", "198.51.100.1, 10.1.2.3", "198.51.100.1"},
+		{"all entries ours falls back to peer", "10.9.9.9, 10.1.2.3", "10.1.2.3"},
+		{"garbage ignored", "not-an-ip", "10.1.2.3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, got := forwardedBackend(t)
+			st := newTestStore(t)
+			addSvc(st, backend.URL, "")
+			cfg := &config.Config{Domain: "example.com", TrustedProxies: mustCIDRs(t, "10.0.0.0/8")}
+			h := New(cfg, st, http.NotFoundHandler())
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+			req.Host = "test.example.com"
+			req.RemoteAddr = "10.1.2.3:5000"
+			req.Header.Set("X-Forwarded-For", tt.xff)
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			if v := got.Get("X-Real-IP"); v != tt.want {
+				t.Errorf("X-Real-IP = %q, want %q", v, tt.want)
+			}
+		})
+	}
+}
+
+// Identity headers are a claim the client makes about itself unless a trusted
+// peer put them there — a backend behind Cloudflare Access must not see them
+// from a LAN client talking to Lantern directly.
+func TestIdentityHeadersStrippedFromUntrustedPeer(t *testing.T) {
+	headers := map[string]string{
+		"Cf-Access-Authenticated-User-Email": "admin@example.com",
+		"Cf-Access-Jwt-Assertion":            "forged.jwt.value",
+		"True-Client-Ip":                     "10.0.0.5",
+		"Remote-User":                        "admin",
+		"X-Forwarded-User":                   "admin",
+	}
+
+	for _, tt := range []struct {
+		name, remote string
+		wantSeen     bool
+	}{
+		{"untrusted peer", "203.0.113.9:4000", false},
+		{"loopback tunnel", "127.0.0.1:4000", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend, got := forwardedBackend(t)
+			st := newTestStore(t)
+			addSvc(st, backend.URL, "")
+			h := newTestHandler(t, st, nil)
+
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+			req.Host = "test.example.com"
+			req.RemoteAddr = tt.remote
+			for k, v := range headers {
+				req.Header.Set(k, v)
+			}
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			for k, v := range headers {
+				if seen := got.Get(k) == v; seen != tt.wantSeen {
+					t.Errorf("%s reached backend = %v, want %v", k, seen, tt.wantSeen)
+				}
+			}
+		})
+	}
+}
+
+// "_direct_<id>" is the synthetic key for a service with no subdomain. It gets
+// no DNS record and no tunnel route, and "_" is a legal Host byte, so it must
+// not be routable from the Host header either.
+func TestServeHTTP_DirectOnlyKeyNotRoutable(t *testing.T) {
+	st := newTestStore(t)
+	st.AddService(&store.Service{ID: "aaaa000000000001", Name: "Direct", Subdomain: "_direct_aaaa000000000001", Target: "http://127.0.0.1:1"})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+	req.Host = "_direct_aaaa000000000001.example.com"
+	newTestHandler(t, st, nil).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("GET _direct_<id>.example.com = %d, want 404", rec.Code)
 	}
 }
 
