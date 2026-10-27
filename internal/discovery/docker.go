@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -183,7 +184,7 @@ func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name str
 	if existing := d.store.GetServiceByContainerName(name); existing != nil {
 		updated := *existing
 		updated.ContainerID = id
-		updated.Target = preserveScheme(existing.Target, info.target)
+		updated.Target = reattachOrWarn(name, existing.Target, info.target)
 		d.store.UpdateService(existing.ID, &updated)
 		d.store.SaveLog("discovery")
 		log.Printf("discovery: reattached %q → %s (%s)", name, existing.Subdomain, id)
@@ -198,7 +199,7 @@ func (d *Discoverer) upsertContainerWithLabels(ctx context.Context, id, name str
 			updated := *existing
 			updated.ContainerID = id
 			updated.ContainerName = name // backfill for pre-fix records
-			updated.Target = preserveScheme(existing.Target, info.target)
+			updated.Target = reattachOrWarn(name, existing.Target, info.target)
 			d.store.UpdateService(existing.ID, &updated)
 			d.store.SaveLog("discovery")
 			log.Printf("discovery: reattached %q → %s (%s)", name, existing.Subdomain, id)
@@ -229,7 +230,8 @@ func (d *Discoverer) resolveContainer(ctx context.Context, name string, ports []
 	}
 
 	// Explicit target URL — takes full precedence over port logic.
-	if u := labels[labelURL]; u != "" {
+	// An unusable value is ignored so the port logic below still applies.
+	if u := labels[labelURL]; u != "" && validTargetURL(u) {
 		info.target = u
 		if s := labels[labelSubdomain]; s != "" {
 			info.subdomain = util.SanitiseSubdomain(s)
@@ -413,14 +415,62 @@ func portsFromNetwork(pm network.PortMap) []container.PortSummary {
 
 // preserveScheme keeps the scheme from oldTarget and replaces the rest with
 // the host:port from newTarget. This ensures a user-corrected scheme (e.g.
-// changing https→http) survives container restarts.
+// changing https→http) survives container restarts. A newTarget with no scheme
+// of its own is not usable as a target, so the old one is kept.
 func preserveScheme(oldTarget, newTarget string) string {
 	if before, _, ok := strings.Cut(oldTarget, "://"); ok {
-		if j := strings.Index(newTarget, "://"); j >= 0 {
-			return before + newTarget[j:]
+		j := strings.Index(newTarget, "://")
+		if j < 0 {
+			return oldTarget
 		}
+		return before + newTarget[j:]
 	}
 	return newTarget
+}
+
+// validTargetURL reports whether a lantern.url label is usable as a backend
+// target. Labels are untrusted — they can be baked into a third-party image —
+// so anything that is not an absolute http(s) URL is ignored rather than
+// stored.
+func validTargetURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// reattachTarget returns the target a reattached container should keep. A
+// restart can move the published port, so the port may change, but the host may
+// not: a label that repoints a live service at another host would hand whoever
+// wrote it every request for that subdomain, including credentials. ok is false
+// when the label tried to move the host, in which case the old target stands.
+func reattachTarget(oldTarget, newTarget string) (string, bool) {
+	merged := preserveScheme(oldTarget, newTarget)
+	if merged == oldTarget {
+		return oldTarget, true
+	}
+	if targetHost(oldTarget) != targetHost(merged) {
+		return oldTarget, false
+	}
+	return merged, true
+}
+
+// reattachOrWarn applies reattachTarget, logging when a label's attempt to move
+// the service to another host is refused.
+func reattachOrWarn(name, oldTarget, newTarget string) string {
+	target, ok := reattachTarget(oldTarget, newTarget)
+	if !ok {
+		log.Printf("discovery: ignoring label target host change for %q (%s → %s); edit the target in Manage",
+			name, oldTarget, newTarget)
+	}
+	return target
+}
+
+// targetHost is the hostname of a target URL, or "" if it does not parse.
+func targetHost(target string) string {
+	u, err := url.Parse(target)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // ── String helpers ────────────────────────────────────────────────────────────

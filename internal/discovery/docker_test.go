@@ -178,11 +178,53 @@ func TestPreserveScheme(t *testing.T) {
 		{"https://10.0.0.1:8080", "http://10.0.0.2:9000", "https://10.0.0.2:9000"},
 		{"http://10.0.0.1:80", "https://10.0.0.2:443", "http://10.0.0.2:443"},
 		{"no-scheme", "http://10.0.0.1:80", "http://10.0.0.1:80"},
+		{"http://10.0.0.1:80", "no-scheme", "http://10.0.0.1:80"}, // unusable new target: keep the old one
 	}
 	for _, tt := range tests {
 		got := preserveScheme(tt.old, tt.new)
 		if got != tt.want {
 			t.Errorf("preserveScheme(%q, %q) = %q, want %q", tt.old, tt.new, got, tt.want)
+		}
+	}
+}
+
+// Container labels are untrusted — they can be baked into a third-party image —
+// so a reattach may move the port of a live service but never its host.
+func TestReattachTarget(t *testing.T) {
+	tests := []struct {
+		name, old, new, want string
+		wantOK               bool
+	}{
+		{"same host, new port", "http://10.0.0.5:32400", "http://10.0.0.5:32401", "http://10.0.0.5:32401", true},
+		{"unchanged", "http://10.0.0.5:32400", "http://10.0.0.5:32400", "http://10.0.0.5:32400", true},
+		{"scheme still preserved", "https://10.0.0.5:8443", "http://10.0.0.5:9443", "https://10.0.0.5:9443", true},
+		{"host hijack refused", "http://10.0.0.5:32400", "http://attacker.example.net:443", "http://10.0.0.5:32400", false},
+		{"hostname change refused", "http://plex.lan:32400", "http://evil.lan:32400", "http://plex.lan:32400", false},
+		{"schemeless label keeps old target", "http://10.0.0.5:32400", "attacker.example.net", "http://10.0.0.5:32400", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := reattachTarget(tt.old, tt.new)
+			if got != tt.want || ok != tt.wantOK {
+				t.Errorf("reattachTarget(%q, %q) = (%q, %v), want (%q, %v)", tt.old, tt.new, got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestValidTargetURL(t *testing.T) {
+	for in, want := range map[string]bool{
+		"http://10.0.0.5:32400": true,
+		"https://plex.lan":      true,
+		"javascript:alert(1)":   false,
+		"file:///etc/passwd":    false,
+		"10.0.0.5:32400":        false, // parses as scheme "10.0.0.5"
+		"/relative":             false,
+		"":                      false,
+		"http://":               false,
+	} {
+		if got := validTargetURL(in); got != want {
+			t.Errorf("validTargetURL(%q) = %v, want %v", in, got, want)
 		}
 	}
 }
