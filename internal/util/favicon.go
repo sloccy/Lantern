@@ -45,6 +45,23 @@ func isBlockedIP(ip net.IP) bool {
 	return false
 }
 
+// cgnatCIDR is RFC 6598 shared address space — where Tailscale hands out
+// addresses, so a homelab's private hosts are reachable there too.
+var cgnatCIDR = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("100.64.0.0/10")
+	return n
+}()
+
+// isPrivateIP is the stricter test used when a remote page, rather than the
+// operator, chose the host: everything isBlockedIP refuses plus RFC1918, IPv6
+// unique-local and CGNAT. Lantern reaching LAN services is the whole point, but
+// only for a target someone configured.
+func isPrivateIP(ip net.IP) bool {
+	return isBlockedIP(ip) || ip.IsPrivate() || ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || cgnatCIDR.Contains(ip)
+}
+
 var baseDialer = &net.Dialer{Timeout: 5 * time.Second}
 
 // validateFaviconURL parses rawURL, enforces http/https scheme, resolves the
@@ -73,10 +90,11 @@ func validateFaviconURL(ctx context.Context, rawURL string) (string, error) {
 	return u.String(), nil
 }
 
-// safeDialContext resolves the hostname and rejects blocked IPs before
-// establishing a TCP connection. This is defense-in-depth against redirect-
-// based bypasses — the primary check is in validateFaviconURL.
-func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+// dialChecked resolves the hostname and rejects any address reject() refuses
+// before establishing a TCP connection. Checking here rather than only before
+// the request is what makes redirect chains and DNS rebinding safe: every
+// connection the client opens passes through it.
+func dialChecked(ctx context.Context, network, addr string, reject func(net.IP) bool) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
@@ -87,30 +105,53 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 	}
 	for _, a := range addrs {
 		ip := net.ParseIP(a)
-		if ip != nil && isBlockedIP(ip) {
+		if ip != nil && reject(ip) {
 			return nil, fmt.Errorf("favicon: host %s resolves to blocked IP %s", host, a)
 		}
 	}
 	return baseDialer.DialContext(ctx, network, net.JoinHostPort(addrs[0], port))
 }
 
-var faviconClient = &http.Client{
-	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // fetching favicons from arbitrary LAN hosts: TLS cert validity is not meaningful
-		DisableKeepAlives: true,
-		DialContext:       safeDialContext,
-	},
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return errors.New("favicon: too many redirects")
-		}
-		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
-			return fmt.Errorf("favicon: redirect to disallowed scheme %q", req.URL.Scheme)
-		}
-		return nil
-	},
+// safeDialContext is defense-in-depth against redirect-based bypasses — the
+// primary check is in validateFaviconURL.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return dialChecked(ctx, network, addr, isBlockedIP)
 }
+
+// publicOnlyDialContext additionally refuses private address space, for a
+// favicon URL whose host came from the fetched page rather than the operator.
+func publicOnlyDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return dialChecked(ctx, network, addr, isPrivateIP)
+}
+
+func newFaviconClient(dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // fetching favicons from arbitrary LAN hosts: TLS cert validity is not meaningful
+			DisableKeepAlives: true,
+			DialContext:       dial,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("favicon: too many redirects")
+			}
+			if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+				return fmt.Errorf("favicon: redirect to disallowed scheme %q", req.URL.Scheme)
+			}
+			return nil
+		},
+	}
+}
+
+var (
+	// faviconClient fetches a target the operator configured: LAN addresses are
+	// allowed, loopback and link-local are not.
+	faviconClient = newFaviconClient(safeDialContext)
+	// faviconPublicClient fetches a URL the remote page chose, so it may not
+	// reach private address space at all.
+	faviconPublicClient = newFaviconClient(publicOnlyDialContext)
+)
 
 var (
 	reFaviconHref     = regexp.MustCompile(`(?i)<link[^>]+rel=["'][^"']*icon[^"']*["'][^>]+href=["']([^"']+)["']`)
@@ -146,7 +187,31 @@ func FetchFaviconForTarget(ctx context.Context, targetURL string) []byte {
 // FetchFaviconFromHTML extracts the favicon URL from pre-fetched HTML and
 // fetches the favicon bytes. Use this when the page HTML is already available.
 func FetchFaviconFromHTML(ctx context.Context, html, baseURL string) []byte {
-	return fetchFaviconBytes(ctx, extractFaviconURL(html, baseURL))
+	ref := extractFaviconURL(html, baseURL)
+	if sameHost(ref, baseURL) {
+		return fetchFaviconBytes(ctx, ref, faviconClient)
+	}
+	// The href named another host, so the page — not the operator — picked the
+	// target. It does not get to aim Lantern at private address space; a public
+	// CDN icon still works. If refused, fall back to the page's own favicon.
+	if data := fetchFaviconBytes(ctx, ref, faviconPublicClient); len(data) > 0 {
+		return data
+	}
+	return fetchFaviconBytes(ctx, resolveRef("/favicon.ico", baseURL), faviconClient)
+}
+
+// sameHost reports whether two URLs name the same host, ignoring scheme, port
+// and case. It is false if either fails to parse.
+func sameHost(a, b string) bool {
+	ua, err := url.Parse(a)
+	if err != nil {
+		return false
+	}
+	ub, err := url.Parse(b)
+	if err != nil {
+		return false
+	}
+	return ua.Hostname() != "" && strings.EqualFold(ua.Hostname(), ub.Hostname())
 }
 
 // FetchAndWriteFavicon looks up the target URL for id from the store, fetches
@@ -166,7 +231,7 @@ func FetchAndWriteFavicon(ctx context.Context, st *store.Store, id string) bool 
 	return st.WriteIcon(id, data) == nil
 }
 
-func fetchFaviconBytes(ctx context.Context, faviconURL string) []byte {
+func fetchFaviconBytes(ctx context.Context, faviconURL string, client *http.Client) []byte {
 	safeURL, err := validateFaviconURL(ctx, faviconURL)
 	if err != nil {
 		return nil
@@ -175,7 +240,7 @@ func fetchFaviconBytes(ctx context.Context, faviconURL string) []byte {
 	if err != nil {
 		return nil
 	}
-	resp, err := faviconClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
 			_ = resp.Body.Close()

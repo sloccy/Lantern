@@ -206,6 +206,8 @@ All configuration is via environment variables.
 - **`lantern` is a reserved subdomain.** It serves the admin UI, so a service can't claim it (otherwise tunnelling it would publish the UI).
 - **TLS 1.3 only** on the HTTPS listener, plus HSTS and a Content-Security-Policy on the Lantern UI.
 - **Tunnelled services are public.** Lantern doesn't add authentication to them; rely on the app's own login, or put a [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) policy in front of anything sensitive. Visitors arriving through the tunnel see a generic error page instead of backend addresses.
+- **Backend TLS is not verified.** Lantern accepts any certificate from a service it proxies to, so anyone positioned between Lantern and a backend can read or alter that traffic — including traffic that arrived through the tunnel. Self-signed certs are the norm for homelab apps, which is why this is the default; keep sensitive backends on a network you trust.
+- **The open homepage is readable by anyone on your LAN.** No login is needed for service names, subdomains, direct-only target URLs or system stats. `ADMIN_PASSWORD` protects everything else; the homepage stays open by design.
 - **The Docker socket is powerful.** Mounting it `:ro` only makes the socket file read-only; it does not limit what the Docker API allows. Anyone who compromises the container can effectively control the host. If that worries you, don't mount the socket and add services manually.
 
 ---
