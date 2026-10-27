@@ -3,6 +3,7 @@ package proxy
 import (
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -68,9 +69,8 @@ func (h *Handler) rightmostUntrusted(xff string) string {
 	if xff == "" {
 		return ""
 	}
-	parts := strings.Split(xff, ",")
-	for i := len(parts) - 1; i >= 0; i-- {
-		ip := net.ParseIP(strings.TrimSpace(parts[i]))
+	for _, part := range slices.Backward(strings.Split(xff, ",")) {
+		ip := net.ParseIP(strings.TrimSpace(part))
 		if ip == nil || h.trustedIP(ip) {
 			continue
 		}
