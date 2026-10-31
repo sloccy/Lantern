@@ -577,7 +577,7 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 		forceTunnel, conflictTarget, err := s.existingCNAME(opCtx, host, false)
 		switch {
 		case err != nil:
-			log.Printf("web: update service %q: %v", id, err) //nolint:gosec // path value, logged for diagnosis
+			log.Printf("web: update service %q: %v", svc.Subdomain, err) //nolint:gosec // svc.Subdomain is store-validated and %q escapes it
 			errorResponse(w, http.StatusBadGateway, err.Error())
 			return
 		case conflictTarget != "":
@@ -639,7 +639,7 @@ func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
 		cleanupErr = s.cf.DeleteRecord(cleanupCtx, dnsID)
 	}
 	if cleanupErr != nil {
-		log.Printf("web: delete service %q: Cloudflare cleanup: %v", id, cleanupErr) //nolint:gosec // path value, logged for diagnosis
+		log.Printf("web: delete service %q: Cloudflare cleanup: %v", svc.Subdomain, cleanupErr) //nolint:gosec // svc.Subdomain is store-validated and %q escapes it
 	}
 
 	var extra []string

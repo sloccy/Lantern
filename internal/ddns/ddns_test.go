@@ -400,3 +400,30 @@ func TestSyncServices_DoesNotAdoptForeignOrARecords(t *testing.T) {
 		}
 	}
 }
+
+// A recreated data volume leaves the store empty while Cloudflare still routes
+// the hostnames. The sync must not prune those live tunnel routes.
+func TestSyncServices_EmptyStoreKeepsLiveTunnelRoutes(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{"success": true, "result": []map[string]string{
+			{"id": "rec-nc", "type": "CNAME", "content": "tid.cfargotunnel.com"},
+		}})
+	})
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			t.Error("unexpected ingress write: live tunnel routes must not be pruned")
+		}
+		writeJSON(w, map[string]any{"success": true, "result": map[string]any{"config": map[string]any{"ingress": []map[string]any{
+			{"hostname": "nextcloud.example.com", "service": "https://localhost:443"},
+			{"service": "http_status:404"},
+		}}}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	cf.SetBaseURLForTest(t, srv.URL)
+
+	c, _ := cf.New("tok", "zone1", "tid", "acct")
+	m := New(&config.Config{Domain: "example.com"}, newTestStore(t), c)
+	m.SyncServices(context.Background())
+}

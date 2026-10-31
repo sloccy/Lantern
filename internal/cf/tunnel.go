@@ -53,9 +53,12 @@ func upsertRule(rules []ingressRule, rule ingressRule) []ingressRule {
 // EnsureTunnelRoutes makes sure every hostname has an ingress rule pointing at
 // Lantern, rewriting stale rules (e.g. ones that point straight at a backend).
 // It also prunes rules that Lantern created for hostnames under domain which no
-// longer belong to a service. Foreign rules (a different service target) and
-// the catch-all are left alone. It reads the tunnel config once and writes it
-// only if something changed.
+// longer belong to a service — but only once Cloudflare confirms the hostname
+// no longer has a CNAME to this tunnel. A route whose DNS still points here is
+// kept even if the store does not know the service (a recreated data volume, or
+// a service added while the sync was running), and a failed lookup keeps the
+// rule too. Foreign rules (a different service target) and the catch-all are
+// left alone. The common case (nothing to prune) costs no extra API calls.
 func (c *Client) EnsureTunnelRoutes(ctx context.Context, domain string, hostnames []string) error {
 	if !c.TunnelEnabled() {
 		return nil
@@ -64,20 +67,51 @@ func (c *Client) EnsureTunnelRoutes(ctx context.Context, domain string, hostname
 	for _, h := range hostnames {
 		want[h] = struct{}{}
 	}
-	return c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
-		kept := make([]ingressRule, 0, len(rules))
+
+	var candidates []string
+	if err := c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
 		for _, r := range rules {
 			if domain != "" && r.Hostname != "" && r.Service == LanternOrigin &&
 				strings.HasSuffix(r.Hostname, "."+domain) {
 				if _, ok := want[r.Hostname]; !ok {
-					log.Printf("cf: pruning stale tunnel route %s", r.Hostname)
-					continue
+					candidates = append(candidates, r.Hostname)
 				}
 			}
-			kept = append(kept, r)
 		}
 		for _, h := range hostnames {
-			kept = upsertRule(kept, lanternRule(h))
+			rules = upsertRule(rules, lanternRule(h))
+		}
+		return rules
+	}); err != nil {
+		return err
+	}
+	if len(candidates) == 0 || c.zoneID == "" {
+		return nil
+	}
+
+	stale := make(map[string]struct{}, len(candidates))
+	for _, h := range candidates {
+		_, _, tunneled, err := c.FindTunnelCNAME(ctx, h)
+		if err != nil {
+			log.Printf("cf: keeping tunnel route %s: DNS check failed: %v", h, err)
+			continue
+		}
+		if tunneled {
+			continue
+		}
+		stale[h] = struct{}{}
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	return c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
+		kept := make([]ingressRule, 0, len(rules))
+		for _, r := range rules {
+			if _, ok := stale[r.Hostname]; ok && r.Service == LanternOrigin {
+				log.Printf("cf: pruning stale tunnel route %s", r.Hostname)
+				continue
+			}
+			kept = append(kept, r)
 		}
 		return kept
 	})
@@ -127,16 +161,20 @@ func (c *Client) RemoveTunnelRoute(ctx context.Context, hostname, cnameID string
 	return errors.Join(dnsErr, ingressErr)
 }
 
-// deleteTunnelCNAME removes the CNAME at hostname, recovering from a lost or
-// stale stored record ID. A missing record is not an error: the desired end
-// state already holds.
+// deleteTunnelCNAME removes the tunnel CNAME at hostname, recovering from a lost
+// or stale stored record ID. A missing record is not an error: the desired end
+// state already holds. A CNAME that points anywhere other than this tunnel is
+// not Lantern's, so it is logged and left alone.
 func (c *Client) deleteTunnelCNAME(ctx context.Context, hostname, cnameID string) error {
 	if cnameID == "" {
-		id, _, err := c.findRecord(ctx, hostname, "CNAME")
+		id, target, ours, err := c.FindTunnelCNAME(ctx, hostname)
 		if err != nil {
 			return fmt.Errorf("find CNAME for %s: %w", hostname, err)
 		}
-		if id == "" {
+		if !ours {
+			if id != "" {
+				log.Printf("cf: not deleting %s: CNAME points at %s, not this tunnel", hostname, target)
+			}
 			return nil
 		}
 		cnameID = id
@@ -147,10 +185,15 @@ func (c *Client) deleteTunnelCNAME(ctx context.Context, hostname, cnameID string
 	}
 	// The stored ID can be stale (the record was recreated in the dashboard,
 	// or a previous attempt already removed it). If the hostname has no CNAME
-	// any more, cleanup is done; otherwise remove the record that is there.
-	curID, _, findErr := c.findRecord(ctx, hostname, "CNAME")
+	// any more, cleanup is done; if it has one of ours under a different ID,
+	// remove that; a foreign CNAME is left alone.
+	curID, target, ours, findErr := c.FindTunnelCNAME(ctx, hostname)
 	if findErr == nil {
 		if curID == "" {
+			return nil
+		}
+		if !ours {
+			log.Printf("cf: not deleting %s: CNAME points at %s, not this tunnel", hostname, target)
 			return nil
 		}
 		if curID != cnameID {

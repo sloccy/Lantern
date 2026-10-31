@@ -568,23 +568,23 @@ func TestFindTunnelCNAME_NoopWithoutTunnel(t *testing.T) {
 }
 
 func TestEnsureTunnelRoutes_PrunesStaleLanternRules(t *testing.T) {
-	m := newTunnelMock(t, []ingressRule{
+	m := newTunnelAndDNSMock(t, []ingressRule{
 		{Hostname: "keep.example.com", Service: LanternOrigin, OriginRequest: &originRequest{NoTLSVerify: true, OriginServerName: "keep.example.com"}},
 		{Hostname: "stale.example.com", Service: LanternOrigin},
 		{Hostname: "backend.example.com", Service: "http://10.0.0.5:8080"},
 		{Hostname: "other.example.net", Service: LanternOrigin},
 		{Service: "http_status:404"},
-	})
+	}, nil) // no DNS records: stale.example.com no longer routes here
 	c, _ := New("tok", "zone1", "tid", "acct")
 
 	if err := c.EnsureTunnelRoutes(context.Background(), "example.com", []string{"keep.example.com"}); err != nil {
 		t.Fatalf("EnsureTunnelRoutes: %v", err)
 	}
-	if m.puts != 1 {
-		t.Fatalf("puts = %d, want 1", m.puts)
+	if m.ingressPUTs != 1 {
+		t.Fatalf("puts = %d, want 1", m.ingressPUTs)
 	}
-	got := make(map[string]string, len(m.last))
-	for _, r := range m.last {
+	got := make(map[string]string, len(m.rules))
+	for _, r := range m.rules {
 		got[r.Hostname] = r.Service
 	}
 	if _, ok := got["stale.example.com"]; ok {
@@ -599,7 +599,7 @@ func TestEnsureTunnelRoutes_PrunesStaleLanternRules(t *testing.T) {
 	if got["other.example.net"] != LanternOrigin {
 		t.Error("rule outside the configured domain was changed")
 	}
-	if last := m.last[len(m.last)-1]; last.Hostname != "" || last.Service != "http_status:404" {
+	if last := m.rules[len(m.rules)-1]; last.Hostname != "" || last.Service != "http_status:404" {
 		t.Errorf("catch-all must stay last, got %+v", last)
 	}
 }
@@ -735,5 +735,158 @@ func TestReplaceTunnelRoute_ReusesExistingCNAME(t *testing.T) {
 	}
 	if creates != 0 {
 		t.Errorf("creates = %d, want 0: an existing CNAME must be reused", creates)
+	}
+}
+
+func TestEnsureTunnelRoutes_KeepsRuleWhoseCNAMEStillPointsAtTunnel(t *testing.T) {
+	// The store does not know stale.example.com (e.g. a recreated data volume),
+	// but its CNAME still points here: the route must survive.
+	m := newTunnelAndDNSMock(t, []ingressRule{
+		{Hostname: "stale.example.com", Service: LanternOrigin},
+		{Service: "http_status:404"},
+	}, []dnsRecord{{ID: "rec-c", Type: "CNAME", Content: "tid.cfargotunnel.com"}})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	if err := c.EnsureTunnelRoutes(context.Background(), "example.com", nil); err != nil {
+		t.Fatalf("EnsureTunnelRoutes: %v", err)
+	}
+	if m.ingressPUTs != 0 {
+		t.Errorf("ingressPUTs = %d, want 0: live route must not be pruned", m.ingressPUTs)
+	}
+	if len(m.rules) != 2 || m.rules[0].Hostname != "stale.example.com" {
+		t.Errorf("rules = %+v, want the route kept", m.rules)
+	}
+}
+
+func TestEnsureTunnelRoutes_KeepsRuleWhenDNSLookupFails(t *testing.T) {
+	var puts int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			puts++
+			_, _ = w.Write(cfOK(map[string]any{}))
+			return
+		}
+		_, _ = w.Write(cfOK(map[string]any{"config": map[string]any{"ingress": []ingressRule{
+			{Hostname: "stale.example.com", Service: LanternOrigin},
+			{Service: "http_status:404"},
+		}}}))
+	})
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(cfError("dns down"))
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "tid", "acct")
+	if err := c.EnsureTunnelRoutes(context.Background(), "example.com", nil); err != nil {
+		t.Fatalf("EnsureTunnelRoutes: %v", err)
+	}
+	if puts != 0 {
+		t.Errorf("puts = %d, want 0: a failed DNS check must keep the rule", puts)
+	}
+}
+
+// ---- Non-address records are never touched ------------------------------------
+
+func TestAddTunnelRoute_LeavesNonAddressRecordsAlone(t *testing.T) {
+	m := newTunnelAndDNSMock(t, nil, []dnsRecord{
+		{ID: "rec-txt", Type: "TXT", Content: "v=spf1 -all"},
+		{ID: "rec-a", Type: "A", Content: "5.6.7.8"},
+		{ID: "rec-a2", Type: "A", Content: "5.6.7.9"},
+	})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	id, err := c.AddTunnelRoute(context.Background(), "drive.example.com")
+	if err != nil || id != "rec-a" {
+		t.Fatalf("AddTunnelRoute = (%q, %v), want (rec-a, nil)", id, err)
+	}
+	if len(m.dnsWrites) != 1 || m.dnsWrites[0] != "PUT rec-a CNAME tid.cfargotunnel.com" {
+		t.Errorf("dnsWrites = %v, want single PUT of the A record", m.dnsWrites)
+	}
+	if len(m.deletions) != 1 || m.deletions[0] != "rec-a2" {
+		t.Errorf("deletions = %v, want only the duplicate A record [rec-a2]", m.deletions)
+	}
+}
+
+func TestAddTunnelRoute_OnlyNonAddressRecordsCreatesCNAME(t *testing.T) {
+	m := newTunnelAndDNSMock(t, nil, []dnsRecord{{ID: "rec-caa", Type: "CAA", Content: "0 issue \"x\""}})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	id, err := c.AddTunnelRoute(context.Background(), "drive.example.com")
+	if err != nil || id != "created" {
+		t.Fatalf("AddTunnelRoute = (%q, %v), want (created, nil)", id, err)
+	}
+	if len(m.dnsWrites) != 0 || len(m.deletions) != 0 || len(m.creations) != 1 {
+		t.Errorf("writes=%v deletions=%v creations=%v, want one create only", m.dnsWrites, m.deletions, m.creations)
+	}
+}
+
+func TestAddTunnelRoute_PrefersExistingCNAMEOverEarlierARecord(t *testing.T) {
+	m := newTunnelAndDNSMock(t, nil, []dnsRecord{
+		{ID: "rec-a", Type: "A", Content: "5.6.7.8"},
+		{ID: "rec-c", Type: "CNAME", Content: "tid.cfargotunnel.com"},
+	})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	id, err := c.AddTunnelRoute(context.Background(), "drive.example.com")
+	if err != nil || id != "rec-c" {
+		t.Fatalf("AddTunnelRoute = (%q, %v), want (rec-c, nil)", id, err)
+	}
+	if len(m.dnsWrites) != 0 || len(m.deletions) != 0 || len(m.creations) != 0 {
+		t.Errorf("writes=%v deletions=%v creations=%v, want none", m.dnsWrites, m.deletions, m.creations)
+	}
+}
+
+// ---- Removal never deletes a CNAME that is not ours --------------------------
+
+func TestRemoveTunnelRoute_LostIDLeavesForeignCNAME(t *testing.T) {
+	m := newTunnelAndDNSMock(t, []ingressRule{{
+		Hostname: "drive.example.com", Service: LanternOrigin,
+	}}, []dnsRecord{{ID: "rec-x", Type: "CNAME", Content: "other.cfargotunnel.com"}})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	if err := c.RemoveTunnelRoute(context.Background(), "drive.example.com", ""); err != nil {
+		t.Fatalf("RemoveTunnelRoute: %v", err)
+	}
+	if len(m.deletions) != 0 {
+		t.Errorf("deletions = %v, want none: the CNAME points at another tunnel", m.deletions)
+	}
+}
+
+func TestRemoveTunnelRoute_StaleIDLeavesForeignCNAME(t *testing.T) {
+	var deleted []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(cfOK([]dnsRecord{{ID: "rec-x", Type: "CNAME", Content: "elsewhere.example.net"}}))
+	})
+	mux.HandleFunc("/zones/zone1/dns_records/", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Path[len("/zones/zone1/dns_records/"):]
+		if r.Method == http.MethodDelete {
+			deleted = append(deleted, id)
+			if id == "rec-old" {
+				_, _ = w.Write(cfError("not found"))
+				return
+			}
+		}
+		_, _ = w.Write(cfOK(dnsRecord{}))
+	})
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_, _ = w.Write(cfOK(map[string]any{}))
+			return
+		}
+		_, _ = w.Write(cfOK(map[string]any{"config": map[string]any{"ingress": []ingressRule{
+			{Hostname: "drive.example.com", Service: LanternOrigin},
+			{Service: "http_status:404"},
+		}}}))
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "tid", "acct")
+	if err := c.RemoveTunnelRoute(context.Background(), "drive.example.com", "rec-old"); err != nil {
+		t.Fatalf("RemoveTunnelRoute: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0] != "rec-old" {
+		t.Errorf("deleted = %v, want only [rec-old]: a foreign CNAME must survive", deleted)
 	}
 }

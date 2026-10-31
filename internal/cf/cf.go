@@ -185,25 +185,28 @@ func (c *Client) FindTunnelCNAME(ctx context.Context, hostname string) (recordID
 }
 
 // ensureTunnelCNAME makes sure the proxied tunnel CNAME for hostname exists and
-// points at the tunnel, and returns its ID. No records are removed unless
-// duplicated: an existing record at the hostname — including a stale A/AAAA
-// record that would otherwise block CNAME creation — is rewritten in place
-// (same record ID, one API call) so enabling a tunnel never deletes records.
+// points at the tunnel, and returns its ID. Only address-type records (CNAME,
+// A, AAAA) are considered; TXT, MX, CAA and the like are never touched. An
+// existing CNAME is preferred, otherwise the first A/AAAA record — which would
+// otherwise block CNAME creation — is rewritten in place (same record ID, one
+// API call). Any further address records at the name are duplicates and are
+// removed.
 func (c *Client) ensureTunnelCNAME(ctx context.Context, hostname string) (string, error) {
 	if c.noop || c.zoneID == "" || c.tunnelID == "" {
 		return "", nil
 	}
 	want := c.tunnelID + ".cfargotunnel.com"
-	recs, err := c.findRecords(ctx, hostname)
+	all, err := c.findRecords(ctx, hostname)
 	if err != nil {
 		return "", err
 	}
+	recs := addressRecords(all)
 	if len(recs) == 0 {
 		return c.createCNAME(ctx, hostname)
 	}
 	first := recs[0]
 	// Content already correct and it is (or identifies as) a CNAME: leave it.
-	if first.Content == want && (first.Type == "" || first.Type == "CNAME") {
+	if first.Content == want && isCNAME(first) {
 		return first.ID, nil
 	}
 	if _, err := c.api.do(ctx, http.MethodPut,
@@ -218,13 +221,34 @@ func (c *Client) ensureTunnelCNAME(ctx context.Context, hostname string) (string
 	); err != nil {
 		return "", fmt.Errorf("update CNAME %s: %w", hostname, err)
 	}
-	// Extras at the same name are defunct either way; report but don't fail.
+	// Extra address records at the same name are defunct either way; report
+	// but don't fail.
 	for _, extra := range recs[1:] {
 		if err := c.DeleteRecord(ctx, extra.ID); err != nil {
 			log.Printf("cf: remove duplicate record for %s: %v", hostname, err)
 		}
 	}
 	return first.ID, nil
+}
+
+// isCNAME reports whether r is (or, in a bare mock, identifies as) a CNAME.
+func isCNAME(r dnsRecord) bool { return r.Type == "" || r.Type == "CNAME" }
+
+// addressRecords keeps only the records that compete for a hostname with a
+// tunnel CNAME (CNAME, A, AAAA), with any CNAME first. Everything else (TXT,
+// MX, CAA, …) can coexist with a CNAME and must be left alone. Records with no
+// type are treated as address records.
+func addressRecords(all []dnsRecord) []dnsRecord {
+	var cnames, others []dnsRecord
+	for _, r := range all {
+		switch {
+		case isCNAME(r):
+			cnames = append(cnames, r)
+		case r.Type == "A" || r.Type == "AAAA":
+			others = append(others, r)
+		}
+	}
+	return append(cnames, others...)
 }
 
 // createDNSRecord posts params to the DNS records endpoint and returns the new record ID.
