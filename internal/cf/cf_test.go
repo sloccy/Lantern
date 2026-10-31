@@ -328,11 +328,11 @@ func TestEnsureCNAME(t *testing.T) {
 // tunnelAndDNSMock serves both the tunnel config and DNS endpoints so
 // AddTunnelRoute can be exercised end to end.
 type tunnelAndDNSMock struct {
-	rules     []ingressRule
+	rules       []ingressRule
 	ingressPUTs int
-	dnsWrites []string  // "METHOD REC_ID" for writes against an existing record
-	creations []string  // "\\t on POST /dns_records
-	deletions []string
+	dnsWrites   []string // "METHOD REC_ID" for writes against an existing record
+	creations   []string // one entry per record created via POST /dns_records
+	deletions   []string
 }
 
 func newTunnelAndDNSMock(t *testing.T, initialRules []ingressRule, records []dnsRecord) *tunnelAndDNSMock {
