@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strings"
@@ -101,6 +102,17 @@ func (s *Server) fragServiceFormEdit(w http.ResponseWriter, r *http.Request) {
 	if svc == nil {
 		http.NotFound(w, r)
 		return
+	}
+	// Show the tunnel checkbox from Cloudflare's actual state, not just the
+	// store: a lost store entry must not make an already-routed service look
+	// untunneled (and adopting it here makes a subsequent save a no-op). Bound
+	// the lookup so a slow API cannot stall the edit modal.
+	if s.dns != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		if s.dns.AdoptTunnelRoute(ctx, svc) {
+			s.save()
+		}
+		cancel()
 	}
 	w.Header().Set("Hx-Trigger-After-Swap", "openmodal")
 	renderTemplate(w, "service-form.html", serviceFormData{

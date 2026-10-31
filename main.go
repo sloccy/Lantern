@@ -135,6 +135,7 @@ func main() {
 
 	// Dynamic DNS.
 	ddnsMgr := ddns.New(cfg, st, cfClient)
+	webSrv.SetDDNSManager(ddnsMgr)
 	go ddnsMgr.Run(ctx)
 
 	// HTTP → HTTPS redirect (with /healthz for container health checks).

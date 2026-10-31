@@ -519,3 +519,50 @@ func TestEnsureTunnelRoutes_NoopWithoutTunnel(t *testing.T) {
 		t.Errorf("err = %v, want nil", err)
 	}
 }
+
+func TestFindTunnelCNAME(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		var recs []dnsRecord
+		switch r.URL.Query().Get("name") {
+		case "ok.example.com":
+			recs = []dnsRecord{{ID: "rec1", Type: "CNAME", Content: "tid.cfargotunnel.com"}}
+		case "other.example.com":
+			recs = []dnsRecord{{ID: "rec2", Type: "CNAME", Content: "other.cfargotunnel.com"}}
+		case "a.example.com":
+			recs = []dnsRecord{{ID: "rec3", Type: "A", Content: "10.0.0.1"}}
+		}
+		_, _ = w.Write(cfOK(recs))
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "tid", "acct")
+	tests := []struct {
+		host      string
+		wantID    string
+		wantField string
+		wantOK    bool
+	}{
+		{"ok.example.com", "rec1", "tid.cfargotunnel.com", true},
+		{"other.example.com", "rec2", "other.cfargotunnel.com", false},
+		{"a.example.com", "", "", false},
+		{"missing.example.com", "", "", false},
+	}
+	for _, tt := range tests {
+		id, target, ok, err := c.FindTunnelCNAME(context.Background(), tt.host)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.host, err)
+		}
+		if id != tt.wantID || target != tt.wantField || ok != tt.wantOK {
+			t.Errorf("%s: got (id=%q target=%q ok=%v), want (%q %q %v)",
+				tt.host, id, target, ok, tt.wantID, tt.wantField, tt.wantOK)
+		}
+	}
+}
+
+func TestFindTunnelCNAME_NoopWithoutTunnel(t *testing.T) {
+	c, _ := New("tok", "zone1", "", "")
+	if id, target, ok, err := c.FindTunnelCNAME(context.Background(), "x.example.com"); err != nil || id != "" || target != "" || ok {
+		t.Errorf("noop: got (%q %q %v, %v), want zero values", id, target, ok, err)
+	}
+}

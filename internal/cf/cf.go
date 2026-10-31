@@ -162,6 +162,28 @@ func (c *Client) EnsureCNAME(ctx context.Context, hostname string) (string, erro
 	return c.ensureTunnelCNAME(ctx, hostname)
 }
 
+// FindTunnelCNAME reports whether hostname already has a CNAME pointing at this
+// client's tunnel endpoint. It returns the record ID and target so callers can
+// distinguish "no CNAME" from "CNAME to a different tunnel"; ok is true only for
+// the exact <tunnelID>.cfargotunnel.com target. Records of other types are
+// ignored, so an A record never counts as tunneled.
+func (c *Client) FindTunnelCNAME(ctx context.Context, hostname string) (recordID, target string, ok bool, err error) {
+	if c.noop || c.zoneID == "" || c.tunnelID == "" {
+		return "", "", false, nil
+	}
+	recs, err := c.findRecords(ctx, hostname)
+	if err != nil {
+		return "", "", false, err
+	}
+	for _, r := range recs {
+		if r.Type != "" && r.Type != "CNAME" {
+			continue
+		}
+		return r.ID, r.Content, r.Content == c.tunnelID+".cfargotunnel.com", nil
+	}
+	return "", "", false, nil
+}
+
 // ensureTunnelCNAME makes sure the proxied tunnel CNAME for hostname exists and
 // points at the tunnel, and returns its ID. No records are removed unless
 // duplicated: an existing record at the hostname — including a stale A/AAAA

@@ -407,6 +407,16 @@ func (s *Store) ClearContainerID(cid string) {
 	}
 }
 
+// SetTunnelRouteID records the hostname routed through the Cloudflare tunnel for
+// a service, so the store agrees with routes adopted from Cloudflare.
+func (s *Store) SetTunnelRouteID(id, hostname string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if svc := s.idIdx[id]; svc != nil {
+		svc.TunnelRouteID = hostname
+	}
+}
+
 // SetDNSRecordID records the Cloudflare record ID for a service.
 func (s *Store) SetDNSRecordID(id, recordID string) {
 	s.mu.Lock()

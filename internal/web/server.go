@@ -13,6 +13,7 @@ import (
 
 	"lantern/internal/cf"
 	"lantern/internal/config"
+	"lantern/internal/ddns"
 	"lantern/internal/store"
 	"lantern/internal/tunnel"
 	"lantern/internal/util"
@@ -32,6 +33,7 @@ type Server struct {
 	cf           *cf.Client
 	scanner      Scanner
 	tunnel       *tunnel.Manager
+	dns          *ddns.Manager
 	mux          *http.ServeMux
 	handler      http.Handler // composed middleware chain, built once in New
 	version      string
@@ -59,6 +61,7 @@ func New(cfg *config.Config, st *store.Store, cfClient *cf.Client, version strin
 
 func (s *Server) SetScanner(sc Scanner)              { s.scanner = sc }
 func (s *Server) SetTunnelManager(t *tunnel.Manager) { s.tunnel = t }
+func (s *Server) SetDDNSManager(m *ddns.Manager)     { s.dns = m }
 func (s *Server) Stop()                              {} // satisfies the lifecycle interface; no cleanup needed
 
 // WarmFavicons pre-populates the favicon cache for all services and bookmarks

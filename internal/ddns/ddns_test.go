@@ -291,3 +291,112 @@ func TestSyncServices_PointsTunnelRoutesAtLantern(t *testing.T) {
 		t.Errorf("ingress not rewritten to Lantern: %s", putBody)
 	}
 }
+
+// A store that lost TunnelRouteID must not fight an existing tunnel CNAME: the
+// route is adopted from Cloudflare before the A-record path runs.
+func TestSyncServices_AdoptsExistingTunnelRoute(t *testing.T) {
+	var posts []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			var body struct {
+				Name string `json:"name"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			posts = append(posts, body.Name)
+			writeJSON(w, map[string]any{"success": true, "result": map[string]string{"id": "new"}})
+			return
+		}
+		if r.URL.Query().Get("name") == "nextcloud.example.com" {
+			writeJSON(w, map[string]any{"success": true, "result": []map[string]string{
+				{"id": "rec-nc", "type": "CNAME", "content": "tid.cfargotunnel.com"},
+			}})
+			return
+		}
+		writeJSON(w, map[string]any{"success": true, "result": []string{}})
+	})
+	mux.HandleFunc("/zones/zone1/dns_records/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected record write: %s %s", r.Method, r.URL.Path)
+		writeJSON(w, map[string]any{"success": true, "result": map[string]string{"id": "x"}})
+	})
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			t.Error("unexpected ingress write; the rule already points at Lantern")
+		}
+		writeJSON(w, map[string]any{"success": true, "result": map[string]any{"config": map[string]any{"ingress": []map[string]any{
+			{"hostname": "nextcloud.example.com", "service": "https://localhost:443", "originRequest": map[string]any{"noTLSVerify": true, "originServerName": "nextcloud.example.com"}},
+			{"service": "http_status:404"},
+		}}}})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	cf.SetBaseURLForTest(t, srv.URL)
+
+	st := newTestStore(t)
+	st.AddService(&store.Service{ID: "nc", Subdomain: "nextcloud", Target: "http://10.0.0.5:8080"})
+	c, _ := cf.New("tok", "zone1", "tid", "acct")
+	m := New(&config.Config{Domain: "example.com", ServerIP: "10.0.0.1"}, st, c)
+	m.SyncServices(context.Background())
+
+	svc := st.GetServiceByID("nc")
+	if svc.TunnelRouteID != "nextcloud.example.com" {
+		t.Errorf("TunnelRouteID = %q, want adopted hostname", svc.TunnelRouteID)
+	}
+	if svc.DNSRecordID != "rec-nc" {
+		t.Errorf("DNSRecordID = %q, want rec-nc", svc.DNSRecordID)
+	}
+	for _, name := range posts {
+		if name == "nextcloud.example.com" {
+			t.Errorf("created an A record for %s: an existing tunnel CNAME must not be fought", name)
+		}
+	}
+}
+
+// Strict adoption: a CNAME to some other tunnel (or an A record) never marks the
+// service as tunneled, and direct-only services are ignored.
+func TestSyncServices_DoesNotAdoptForeignOrARecords(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSON(w, map[string]any{"success": true, "result": map[string]string{"id": "new"}})
+			return
+		}
+		if r.URL.Query().Get("type") == "A" {
+			writeJSON(w, map[string]any{"success": true, "result": []string{}})
+			return
+		}
+		switch r.URL.Query().Get("name") {
+		case "foreign.example.com":
+			writeJSON(w, map[string]any{"success": true, "result": []map[string]string{
+				{"id": "rec-f", "type": "CNAME", "content": "other.cfargotunnel.com"},
+			}})
+		case "a.example.com":
+			writeJSON(w, map[string]any{"success": true, "result": []map[string]string{
+				{"id": "rec-a", "type": "A", "content": "10.0.0.9"},
+			}})
+		case "direct.example.com":
+			writeJSON(w, map[string]any{"success": true, "result": []map[string]string{
+				{"id": "rec-d", "type": "CNAME", "content": "tid.cfargotunnel.com"},
+			}})
+		default:
+			writeJSON(w, map[string]any{"success": true, "result": []string{}})
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	cf.SetBaseURLForTest(t, srv.URL)
+
+	st := newTestStore(t)
+	st.AddService(&store.Service{ID: "f", Subdomain: "foreign", Target: "http://10.0.0.5:1"})
+	st.AddService(&store.Service{ID: "a", Subdomain: "a", Target: "http://10.0.0.5:2"})
+	st.AddService(&store.Service{ID: "d", Subdomain: "direct", Target: "http://10.0.0.5:3", DirectOnly: true})
+	c, _ := cf.New("tok", "zone1", "tid", "acct")
+	m := New(&config.Config{Domain: "example.com"}, st, c)
+	m.SyncServices(context.Background())
+
+	for _, id := range []string{"f", "a", "d"} {
+		if got := st.GetServiceByID(id).TunnelRouteID; got != "" {
+			t.Errorf("service %s: TunnelRouteID = %q, want empty (not adopted)", id, got)
+		}
+	}
+}

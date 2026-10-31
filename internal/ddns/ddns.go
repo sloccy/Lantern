@@ -109,6 +109,39 @@ func (m *Manager) checkAndUpdate(ctx context.Context) {
 	}
 }
 
+// AdoptTunnelRoute records that svc is already routed through the configured
+// Cloudflare Tunnel when the store does not know it. The authoritative signal is
+// the service hostname's DNS record: a CNAME pointing at this tunnel's
+// <tunnelID>.cfargotunnel.com endpoint. Only that exact target is adopted; a
+// CNAME to a different tunnel is logged and left alone, and A records are never
+// treated as tunneled. Returns true when the store was updated.
+func (m *Manager) AdoptTunnelRoute(ctx context.Context, svc *store.Service) bool {
+	if !m.cf.TunnelEnabled() || m.cfg.Domain == "" || svc == nil {
+		return false
+	}
+	if svc.DirectOnly || svc.Subdomain == "" || svc.TunnelRouteID != "" {
+		return false
+	}
+	host := svc.Subdomain + "." + m.cfg.Domain
+	recordID, target, ok, err := m.cf.FindTunnelCNAME(ctx, host)
+	if err != nil {
+		log.Printf("dns: detect tunnel route %s: %v", host, err)
+		return false
+	}
+	if !ok {
+		if target != "" {
+			log.Printf("dns: %s points at %s, not the configured tunnel — leaving it alone", host, target)
+		}
+		return false
+	}
+	m.store.SetTunnelRouteID(svc.ID, host)
+	if recordID != "" && recordID != svc.DNSRecordID {
+		m.store.SetDNSRecordID(svc.ID, recordID)
+	}
+	log.Printf("dns: adopted existing tunnel route %s (record %s)", host, recordID)
+	return true
+}
+
 // SyncServices re-asserts the Cloudflare record of every proxied service
 // (and lantern.<domain>): missing or wrong records are created or corrected,
 // and stored record IDs are refreshed. No-op without Cloudflare credentials,
@@ -124,6 +157,17 @@ func (m *Manager) SyncServices(ctx context.Context) {
 		}
 	}
 	services := m.store.GetAllServices()
+
+	// The store can lose track of a service's tunnel route (a recreated /data
+	// volume, a service re-added after a reset) while its DNS CNAME and ingress
+	// rule live on in Cloudflare. Adopt those routes before choosing records to
+	// sync, otherwise the service is treated as an A record and fights the
+	// existing tunnel CNAME on every tick.
+	for _, svc := range services {
+		if m.AdoptTunnelRoute(ctx, svc) {
+			changed = true
+		}
+	}
 
 	// Tunnel ingress rules must point at Lantern (not at the backend), so every
 	// tunneled request goes through the proxy. This also migrates old rules.
