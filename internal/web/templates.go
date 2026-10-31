@@ -87,25 +87,36 @@ func preRender(name string, data any) template.HTML {
 	return template.HTML(buf.String()) //nolint:gosec // output is rendered by html/template which handles escaping
 }
 
-// toastTrigger writes HX-Trigger headers that close the modal and show a toast.
+// toastTrigger writes HX-Trigger headers that close the modal and show a
+// success toast.
 func toastTrigger(w http.ResponseWriter, msg string, extraEvents ...string) {
+	toastTriggerType(w, msg, "success", extraEvents...)
+}
+
+// toastTriggerType writes HX-Trigger headers that show a toast of typ
+// ("success" or "error") and fire any extra events.
+func toastTriggerType(w http.ResponseWriter, msg, typ string, extraEvents ...string) {
 	m := map[string]any{
 		"closemodal": nil,
-		"showtoast":  map[string]string{"msg": msg, "type": "success"},
+		"showtoast":  map[string]string{"msg": msg, "type": typ},
 	}
 	for _, ev := range extraEvents {
 		m[ev] = nil
 	}
-	b, _ := json.Marshal(m)
+	hxTrigger(w, m)
+}
+
+// hxTrigger writes an HX-Trigger header carrying the given events.
+func hxTrigger(w http.ResponseWriter, events map[string]any) {
+	b, _ := json.Marshal(events)
 	w.Header().Set("Hx-Trigger", string(b))
 }
 
 // errorResponse sends an HTMX error toast and the given HTTP status code.
 func errorResponse(w http.ResponseWriter, code int, msg string) {
-	b, _ := json.Marshal(map[string]any{
+	hxTrigger(w, map[string]any{
 		"showtoast": map[string]string{"msg": msg, "type": "error"},
 	})
-	w.Header().Set("Hx-Trigger", string(b))
 	w.WriteHeader(code)
 }
 

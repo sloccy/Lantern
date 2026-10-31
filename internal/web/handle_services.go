@@ -3,6 +3,7 @@ package web
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,11 @@ import (
 	"lantern/internal/store"
 	"lantern/internal/util"
 )
+
+// cfOpTimeout bounds Cloudflare API work triggered by a web request. Deletion
+// stays synchronous so the UI can report failure, but it must not hang on a
+// slow API.
+var cfOpTimeout = 10 * time.Second
 
 func (s *Server) listServices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.GetAllServices())
@@ -159,7 +165,41 @@ func (s *Server) createService(w http.ResponseWriter, r *http.Request) {
 		DirectOnly: req.DirectOnly,
 		Tunnel:     req.Tunnel,
 	}
-	svc.DNSRecordID, svc.TunnelRouteID = s.reconcileDNS(r.Context(), dnsState{DirectOnly: true}, want)
+
+	// Bound all Cloudflare work in this request so a slow API cannot hold the
+	// form open indefinitely.
+	opCtx, cancel := context.WithTimeout(r.Context(), cfOpTimeout)
+	defer cancel()
+
+	if !req.DirectOnly && s.cfg.Domain != "" {
+		host := subdomain + "." + s.cfg.Domain
+		forceTunnel, conflictTarget, err := s.existingCNAME(opCtx, host, req.Tunnel)
+		switch {
+		case err != nil:
+			log.Printf("web: create service %q: %v", subdomain, err) //nolint:gosec // subdomain is sanitised above
+			errorResponse(w, http.StatusBadGateway, err.Error())
+			return
+		case conflictTarget != "":
+			errorResponse(w, http.StatusConflict, fmt.Sprintf(
+				"%s is already a CNAME to %s; tick Route via Tunnel to take it over, or remove the record in Cloudflare.",
+				host, conflictTarget))
+			return
+		case forceTunnel:
+			// The hostname already routes through our tunnel (a leftover from
+			// a previous remove/re-add). Adopt it instead of fighting the CNAME
+			// with a new A record.
+			req.Tunnel = true
+			want.Tunnel = true
+		}
+	}
+
+	dnsID, tunnelRouteID, err := s.reconcileDNS(opCtx, dnsState{DirectOnly: true}, want)
+	if err != nil {
+		log.Printf("web: create DNS %q: %v", subdomain, err) //nolint:gosec // subdomain is sanitised above
+		errorResponse(w, http.StatusBadGateway, fmt.Sprintf("Cloudflare: %v", err))
+		return
+	}
+	svc.DNSRecordID, svc.TunnelRouteID = dnsID, tunnelRouteID
 
 	// Write uploaded icon file now that svcID is known.
 	if len(uploadedIconData) > 0 {
@@ -255,6 +295,29 @@ const (
 	dnsReplaceTunnel           // replace tunnel route (subdomain changed)
 )
 
+// existingCNAME inspects the DNS record already at host before a service is
+// created or renamed into A-record mode. It reports forceTunnel when the record
+// is a CNAME pointing at this Lantern instance's tunnel (which should be
+// adopted even if the form did not ask for tunnel mode), conflictTarget when a
+// CNAME points somewhere else and the caller did not explicitly request tunnel
+// mode, and an error when the lookup itself fails.
+func (s *Server) existingCNAME(ctx context.Context, host string, explicitTunnel bool) (forceTunnel bool, conflictTarget string, err error) {
+	if !s.cf.TunnelEnabled() {
+		return false, "", nil
+	}
+	recordID, target, ours, err := s.cf.FindTunnelCNAME(ctx, host)
+	if err != nil {
+		return false, "", fmt.Errorf("check Cloudflare for %s: %w", host, err)
+	}
+	if ours {
+		return true, "", nil
+	}
+	if recordID != "" && target != "" && !explicitTunnel {
+		return false, target, nil
+	}
+	return false, "", nil
+}
+
 // planDNS is a pure function that maps old and new DNS states to the action needed.
 func planDNS(old, want dnsState) dnsAction {
 	switch old.mode() {
@@ -297,103 +360,96 @@ func planDNS(old, want dnsState) dnsAction {
 
 // reconcileDNS applies the necessary Cloudflare API calls to transition from old to want.
 // It returns the resulting DNSRecordID and TunnelRouteID to store on the service.
-func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, tunnelRouteID string) {
+// A non-nil error means the transition failed and the caller must not persist
+// the new state; the periodic sync will restore the old one.
+func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, tunnelRouteID string, err error) {
 	oldHostname := old.Subdomain + "." + s.cfg.Domain
 	newHostname := want.Subdomain + "." + s.cfg.Domain
 
 	switch planDNS(old, want) {
 	case dnsNoop:
-		return old.DNSRecordID, old.TunnelRouteID
+		return old.DNSRecordID, old.TunnelRouteID, nil
 
 	case dnsCreateA:
-		if s.cfg.ServerIP != "" {
-			id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
-			if err != nil {
-				log.Printf("web: create DNS %s: %v", want.Subdomain, err)
-			} else {
-				return id, ""
-			}
+		if s.cfg.ServerIP == "" {
+			return "", "", nil
 		}
+		id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
+		if err != nil {
+			return "", "", fmt.Errorf("create DNS record %s: %w", newHostname, err)
+		}
+		return id, "", nil
 
 	case dnsDeleteAll:
 		if old.TunnelRouteID != "" {
 			if err := s.cf.RemoveTunnelRoute(ctx, old.TunnelRouteID, old.DNSRecordID); err != nil {
-				log.Printf("web: remove tunnel route %s: %v", old.Subdomain, err)
+				return "", "", fmt.Errorf("remove tunnel route %s: %w", old.TunnelRouteID, err)
 			}
 		} else if old.DNSRecordID != "" {
 			if err := s.cf.DeleteRecord(ctx, old.DNSRecordID); err != nil {
-				log.Printf("web: delete DNS %s: %v", old.Subdomain, err)
+				return "", "", fmt.Errorf("delete DNS record %s: %w", oldHostname, err)
 			}
 		}
+		return "", "", nil
 
 	case dnsSwapA:
 		if old.DNSRecordID != "" {
 			if err := s.cf.DeleteRecord(ctx, old.DNSRecordID); err != nil {
-				log.Printf("web: delete DNS %s: %v", old.Subdomain, err)
+				return "", "", fmt.Errorf("delete DNS record %s: %w", oldHostname, err)
 			}
 		}
-		if s.cfg.ServerIP != "" {
-			id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
-			if err != nil {
-				log.Printf("web: create DNS %s: %v", want.Subdomain, err)
-			} else {
-				return id, ""
-			}
+		if s.cfg.ServerIP == "" {
+			return "", "", nil
 		}
+		id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
+		if err != nil {
+			return "", "", fmt.Errorf("create DNS record %s: %w", newHostname, err)
+		}
+		return id, "", nil
 
-	case dnsCreateTunnel:
-		if s.cf.TunnelEnabled() {
-			id, err := s.cf.AddTunnelRoute(ctx, newHostname)
-			if err != nil {
-				log.Printf("web: add tunnel route %s: %v", want.Subdomain, err)
-				// The ingress rule may already be live in the tunnel, so keep
-				// the old state instead of wiping it: the GUI must not claim
-				// the tunnel is off while Cloudflare still routes it.
-				return old.DNSRecordID, old.TunnelRouteID
-			}
-			return id, newHostname
+	case dnsCreateTunnel, dnsAToTunnel:
+		if !s.cf.TunnelEnabled() {
+			return "", "", errors.New("tunnel is not configured")
 		}
-
-	case dnsAToTunnel:
-		if s.cf.TunnelEnabled() {
-			if old.DNSRecordID != "" {
-				if err := s.cf.DeleteRecord(ctx, old.DNSRecordID); err != nil {
-					log.Printf("web: delete DNS %s: %v", old.Subdomain, err)
-				}
+		// A rename (A record at oldHostname → tunnel at newHostname) must
+		// remove the old A record. When only the mode changes, AddTunnelRoute
+		// rewrites the existing record at the same hostname in place.
+		if oldHostname != newHostname && old.DNSRecordID != "" {
+			if err := s.cf.DeleteRecord(ctx, old.DNSRecordID); err != nil {
+				return "", "", fmt.Errorf("delete DNS record %s: %w", oldHostname, err)
 			}
-			id, err := s.cf.AddTunnelRoute(ctx, newHostname)
-			if err != nil {
-				log.Printf("web: add tunnel route %s: %v", want.Subdomain, err)
-				return old.DNSRecordID, old.TunnelRouteID
-			}
-			return id, newHostname
 		}
+		id, err := s.cf.AddTunnelRoute(ctx, newHostname)
+		if err != nil {
+			return "", "", fmt.Errorf("add tunnel route %s: %w", newHostname, err)
+		}
+		return id, newHostname, nil
 
 	case dnsTunnelToA:
 		if err := s.cf.RemoveTunnelRoute(ctx, old.TunnelRouteID, old.DNSRecordID); err != nil {
-			log.Printf("web: remove tunnel route %s: %v", old.Subdomain, err)
+			return "", "", fmt.Errorf("remove tunnel route %s: %w", old.TunnelRouteID, err)
 		}
-		if s.cfg.ServerIP != "" {
-			id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
-			if err != nil {
-				log.Printf("web: create DNS %s: %v", want.Subdomain, err)
-			} else {
-				return id, ""
-			}
+		if s.cfg.ServerIP == "" {
+			return "", "", nil
 		}
+		id, err := s.cf.UpsertARecord(ctx, newHostname, s.cfg.ServerIP)
+		if err != nil {
+			return "", "", fmt.Errorf("create DNS record %s: %w", newHostname, err)
+		}
+		return id, "", nil
 
 	case dnsReplaceTunnel:
-		if s.cf.TunnelEnabled() {
-			id, err := s.cf.ReplaceTunnelRoute(ctx, oldHostname, newHostname, old.DNSRecordID)
-			if err != nil {
-				log.Printf("web: replace tunnel route %s→%s: %v", old.Subdomain, want.Subdomain, err)
-				return old.DNSRecordID, old.TunnelRouteID
-			}
-			return id, newHostname
+		if !s.cf.TunnelEnabled() {
+			return "", "", errors.New("tunnel is not configured")
 		}
+		id, err := s.cf.ReplaceTunnelRoute(ctx, oldHostname, newHostname, old.DNSRecordID)
+		if err != nil {
+			return "", "", fmt.Errorf("replace tunnel route %s→%s: %w", oldHostname, newHostname, err)
+		}
+		return id, newHostname, nil
 	}
 
-	return "", ""
+	return "", "", nil
 }
 
 func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
@@ -506,6 +562,34 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 	if req.Tunnel != nil {
 		wantTunnel = *req.Tunnel
 	}
+
+	// Bound all Cloudflare work in this request so a slow API cannot hold the
+	// form open indefinitely.
+	opCtx, cancel := context.WithTimeout(r.Context(), cfOpTimeout)
+	defer cancel()
+
+	// A rename (or a direct → A transition) must not collide with a CNAME left
+	// at the new hostname. A CNAME at our own tunnel is adopted even when the
+	// box was unticked; a foreign one is a conflict. An intentional untick on
+	// the same hostname still flows through dnsTunnelToA.
+	if !directOnly && !wantTunnel && s.cfg.Domain != "" && newSub != oldSub {
+		host := newSub + "." + s.cfg.Domain
+		forceTunnel, conflictTarget, err := s.existingCNAME(opCtx, host, false)
+		switch {
+		case err != nil:
+			log.Printf("web: update service %q: %v", id, err) //nolint:gosec // path value, logged for diagnosis
+			errorResponse(w, http.StatusBadGateway, err.Error())
+			return
+		case conflictTarget != "":
+			errorResponse(w, http.StatusConflict, fmt.Sprintf(
+				"%s is already a CNAME to %s; tick Route via Tunnel to take it over, or remove the record in Cloudflare.",
+				host, conflictTarget))
+			return
+		case forceTunnel:
+			wantTunnel = true
+		}
+	}
+
 	old := dnsState{
 		Subdomain:     oldSub,
 		DirectOnly:    svc.DirectOnly,
@@ -518,7 +602,13 @@ func (s *Server) updateService(w http.ResponseWriter, r *http.Request) {
 		DirectOnly: directOnly,
 		Tunnel:     wantTunnel,
 	}
-	updated.DNSRecordID, updated.TunnelRouteID = s.reconcileDNS(r.Context(), old, want)
+	dnsID, tunnelRouteID, err := s.reconcileDNS(opCtx, old, want)
+	if err != nil {
+		log.Printf("web: update DNS %q: %v", newSub, err) //nolint:gosec // subdomain is sanitised above
+		errorResponse(w, http.StatusBadGateway, fmt.Sprintf("Cloudflare: %v", err))
+		return
+	}
+	updated.DNSRecordID, updated.TunnelRouteID = dnsID, tunnelRouteID
 
 	s.store.UpdateService(id, updated)
 	s.save()
@@ -534,15 +624,25 @@ func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, dnsID, tunnelRoute := s.store.DeleteService(id)
+
+	// Cleanup is bounded so a slow Cloudflare API cannot hang the request, and
+	// WithoutCancel keeps it running if the browser goes away after the local
+	// delete has already happened. A failure is reported to the user instead of
+	// being silently swallowed.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), cfOpTimeout)
+	defer cancel()
+
+	var cleanupErr error
 	if tunnelRoute != "" {
-		if err := s.cf.RemoveTunnelRoute(r.Context(), tunnelRoute, dnsID); err != nil {
-			log.Printf("web: remove tunnel route: %v", err)
-		}
+		cleanupErr = s.cf.RemoveTunnelRoute(cleanupCtx, tunnelRoute, dnsID)
 	} else if dnsID != "" {
-		if err := s.cf.DeleteRecord(r.Context(), dnsID); err != nil {
-			log.Printf("web: delete DNS record: %v", err)
-		}
+		cleanupErr = s.cf.DeleteRecord(cleanupCtx, dnsID)
 	}
+	if cleanupErr != nil {
+		log.Printf("web: delete service %q: Cloudflare cleanup: %v", id, cleanupErr) //nolint:gosec // path value, logged for diagnosis
+	}
+
+	var extra []string
 	if svc.Source == store.SourceDocker {
 		// Send the container back to Discovered so it can be re-assigned.
 		ip, port := util.SplitTarget(svc.Target)
@@ -559,7 +659,12 @@ func (s *Server) deleteService(w http.ResponseWriter, r *http.Request) {
 				DiscoveredAt:       time.Now(),
 			})
 		}
-		w.Header().Set("Hx-Trigger", `{"refreshDiscovered":null}`)
+		extra = append(extra, "refreshDiscovered")
+	}
+	if cleanupErr != nil {
+		toastTriggerType(w, "Service removed, but Cloudflare cleanup failed: "+cleanupErr.Error(), "error", extra...)
+	} else {
+		toastTrigger(w, "Service removed", extra...)
 	}
 	s.store.DeleteIcon(id)
 	s.save()

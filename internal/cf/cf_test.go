@@ -489,7 +489,7 @@ func TestEnsureTunnelRoutes_RewritesStaleRuleToLantern(t *testing.T) {
 	})
 	c, _ := New("tok", "zone1", "tid", "acct")
 
-	if err := c.EnsureTunnelRoutes(context.Background(), []string{"plex.example.com", "new.example.com"}); err != nil {
+	if err := c.EnsureTunnelRoutes(context.Background(), "example.com", []string{"plex.example.com", "new.example.com"}); err != nil {
 		t.Fatalf("EnsureTunnelRoutes: %v", err)
 	}
 	if m.puts != 1 || len(m.last) != 3 {
@@ -505,7 +505,7 @@ func TestEnsureTunnelRoutes_RewritesStaleRuleToLantern(t *testing.T) {
 	}
 
 	// Already correct: no further write.
-	if err := c.EnsureTunnelRoutes(context.Background(), []string{"plex.example.com", "new.example.com"}); err != nil {
+	if err := c.EnsureTunnelRoutes(context.Background(), "example.com", []string{"plex.example.com", "new.example.com"}); err != nil {
 		t.Fatal(err)
 	}
 	if m.puts != 1 {
@@ -515,7 +515,7 @@ func TestEnsureTunnelRoutes_RewritesStaleRuleToLantern(t *testing.T) {
 
 func TestEnsureTunnelRoutes_NoopWithoutTunnel(t *testing.T) {
 	c, _ := New("tok", "zone1", "", "") // no tunnel configured
-	if err := c.EnsureTunnelRoutes(context.Background(), []string{"x.example.com"}); err != nil {
+	if err := c.EnsureTunnelRoutes(context.Background(), "example.com", []string{"x.example.com"}); err != nil {
 		t.Errorf("err = %v, want nil", err)
 	}
 }
@@ -564,5 +564,176 @@ func TestFindTunnelCNAME_NoopWithoutTunnel(t *testing.T) {
 	c, _ := New("tok", "zone1", "", "")
 	if id, target, ok, err := c.FindTunnelCNAME(context.Background(), "x.example.com"); err != nil || id != "" || target != "" || ok {
 		t.Errorf("noop: got (%q %q %v, %v), want zero values", id, target, ok, err)
+	}
+}
+
+func TestEnsureTunnelRoutes_PrunesStaleLanternRules(t *testing.T) {
+	m := newTunnelMock(t, []ingressRule{
+		{Hostname: "keep.example.com", Service: LanternOrigin, OriginRequest: &originRequest{NoTLSVerify: true, OriginServerName: "keep.example.com"}},
+		{Hostname: "stale.example.com", Service: LanternOrigin},
+		{Hostname: "backend.example.com", Service: "http://10.0.0.5:8080"},
+		{Hostname: "other.example.net", Service: LanternOrigin},
+		{Service: "http_status:404"},
+	})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	if err := c.EnsureTunnelRoutes(context.Background(), "example.com", []string{"keep.example.com"}); err != nil {
+		t.Fatalf("EnsureTunnelRoutes: %v", err)
+	}
+	if m.puts != 1 {
+		t.Fatalf("puts = %d, want 1", m.puts)
+	}
+	got := make(map[string]string, len(m.last))
+	for _, r := range m.last {
+		got[r.Hostname] = r.Service
+	}
+	if _, ok := got["stale.example.com"]; ok {
+		t.Error("stale Lantern-origin rule was not pruned")
+	}
+	if got["keep.example.com"] != LanternOrigin {
+		t.Errorf("desired rule = %q, want %q", got["keep.example.com"], LanternOrigin)
+	}
+	if got["backend.example.com"] != "http://10.0.0.5:8080" {
+		t.Errorf("foreign-origin rule was changed to %q", got["backend.example.com"])
+	}
+	if got["other.example.net"] != LanternOrigin {
+		t.Error("rule outside the configured domain was changed")
+	}
+	if last := m.last[len(m.last)-1]; last.Hostname != "" || last.Service != "http_status:404" {
+		t.Errorf("catch-all must stay last, got %+v", last)
+	}
+}
+
+func TestModifyIngress_RetriesPUTOnce(t *testing.T) {
+	var puts int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut {
+			_, _ = w.Write(cfOK(map[string]any{"config": map[string]any{"ingress": []ingressRule{
+				{Service: "http_status:404"},
+			}}}))
+			return
+		}
+		puts++
+		if puts == 1 {
+			_, _ = w.Write(cfError("temporary failure"))
+			return
+		}
+		_, _ = w.Write(cfOK(map[string]any{}))
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "tid", "acct")
+	if err := c.EnsureTunnelRoutes(context.Background(), "example.com", []string{"keep.example.com"}); err != nil {
+		t.Fatalf("EnsureTunnelRoutes: %v", err)
+	}
+	if puts != 2 {
+		t.Errorf("puts = %d, want 2 (initial + one retry)", puts)
+	}
+}
+
+func TestRemoveTunnelRoute_DeletesDNSBeforeIngress(t *testing.T) {
+	var order []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			order = append(order, "dns-delete")
+		}
+		_, _ = w.Write(cfOK(dnsRecord{}))
+	})
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			order = append(order, "ingress-put")
+			_, _ = w.Write(cfError("ingress down"))
+			return
+		}
+		_, _ = w.Write(cfOK(map[string]any{"config": map[string]any{"ingress": []ingressRule{
+			{Hostname: "drive.example.com", Service: LanternOrigin},
+			{Service: "http_status:404"},
+		}}}))
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "tid", "acct")
+	if err := c.RemoveTunnelRoute(context.Background(), "drive.example.com", "rec-c"); err == nil {
+		t.Fatal("RemoveTunnelRoute = nil, want ingress error")
+	}
+	if len(order) < 2 || order[0] != "dns-delete" || order[1] != "ingress-put" {
+		t.Errorf("order = %v, want DNS delete before ingress PUT", order)
+	}
+}
+
+func TestRemoveTunnelRoute_StaleRecordIDFallsBackToLookup(t *testing.T) {
+	var deleted []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(cfOK([]dnsRecord{{ID: "rec-new", Type: "CNAME", Content: "tid.cfargotunnel.com"}}))
+	})
+	mux.HandleFunc("/zones/zone1/dns_records/", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Path[len("/zones/zone1/dns_records/"):]
+		if r.Method == http.MethodDelete {
+			deleted = append(deleted, id)
+			if id == "rec-old" {
+				_, _ = w.Write(cfError("not found"))
+				return
+			}
+		}
+		_, _ = w.Write(cfOK(dnsRecord{}))
+	})
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_, _ = w.Write(cfOK(map[string]any{}))
+			return
+		}
+		_, _ = w.Write(cfOK(map[string]any{"config": map[string]any{"ingress": []ingressRule{
+			{Hostname: "drive.example.com", Service: LanternOrigin},
+			{Service: "http_status:404"},
+		}}}))
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "tid", "acct")
+	if err := c.RemoveTunnelRoute(context.Background(), "drive.example.com", "rec-old"); err != nil {
+		t.Fatalf("RemoveTunnelRoute: %v", err)
+	}
+	if len(deleted) != 2 || deleted[0] != "rec-old" || deleted[1] != "rec-new" {
+		t.Errorf("deleted = %v, want [rec-old rec-new]", deleted)
+	}
+}
+
+func TestReplaceTunnelRoute_ReusesExistingCNAME(t *testing.T) {
+	var creates int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_, _ = w.Write(cfOK(map[string]any{}))
+			return
+		}
+		_, _ = w.Write(cfOK(map[string]any{"config": map[string]any{"ingress": []ingressRule{
+			{Hostname: "old.example.com", Service: LanternOrigin},
+			{Service: "http_status:404"},
+		}}}))
+	})
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			creates++
+		}
+		_, _ = w.Write(cfOK([]dnsRecord{{ID: "rec-new", Type: "CNAME", Content: "tid.cfargotunnel.com"}}))
+	})
+	mux.HandleFunc("/zones/zone1/dns_records/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(cfOK(dnsRecord{}))
+	})
+	cfServer(t, mux)
+
+	c, _ := New("tok", "zone1", "tid", "acct")
+	id, err := c.ReplaceTunnelRoute(context.Background(), "old.example.com", "new.example.com", "rec-old")
+	if err != nil {
+		t.Fatalf("ReplaceTunnelRoute: %v", err)
+	}
+	if id != "rec-new" {
+		t.Errorf("id = %q, want rec-new", id)
+	}
+	if creates != 0 {
+		t.Errorf("creates = %d, want 0: an existing CNAME must be reused", creates)
 	}
 }

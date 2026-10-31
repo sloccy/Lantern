@@ -177,7 +177,7 @@ func (m *Manager) SyncServices(ctx context.Context) {
 			tunnelHosts = append(tunnelHosts, svc.Subdomain+"."+m.cfg.Domain)
 		}
 	}
-	if err := m.cf.EnsureTunnelRoutes(ctx, tunnelHosts); err != nil {
+	if err := m.cf.EnsureTunnelRoutes(ctx, m.cfg.Domain, tunnelHosts); err != nil {
 		log.Printf("dns: sync tunnel routes: %v", err)
 	}
 

@@ -3,10 +3,12 @@ package cf
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"slices"
+	"strings"
 )
 
 // TunnelEnabled reports whether Cloudflare Tunnel management is active.
@@ -50,16 +52,34 @@ func upsertRule(rules []ingressRule, rule ingressRule) []ingressRule {
 
 // EnsureTunnelRoutes makes sure every hostname has an ingress rule pointing at
 // Lantern, rewriting stale rules (e.g. ones that point straight at a backend).
-// It reads the tunnel config once and writes it only if something changed.
-func (c *Client) EnsureTunnelRoutes(ctx context.Context, hostnames []string) error {
-	if !c.TunnelEnabled() || len(hostnames) == 0 {
+// It also prunes rules that Lantern created for hostnames under domain which no
+// longer belong to a service. Foreign rules (a different service target) and
+// the catch-all are left alone. It reads the tunnel config once and writes it
+// only if something changed.
+func (c *Client) EnsureTunnelRoutes(ctx context.Context, domain string, hostnames []string) error {
+	if !c.TunnelEnabled() {
 		return nil
 	}
+	want := make(map[string]struct{}, len(hostnames))
+	for _, h := range hostnames {
+		want[h] = struct{}{}
+	}
 	return c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
-		for _, h := range hostnames {
-			rules = upsertRule(rules, lanternRule(h))
+		kept := make([]ingressRule, 0, len(rules))
+		for _, r := range rules {
+			if domain != "" && r.Hostname != "" && r.Service == LanternOrigin &&
+				strings.HasSuffix(r.Hostname, "."+domain) {
+				if _, ok := want[r.Hostname]; !ok {
+					log.Printf("cf: pruning stale tunnel route %s", r.Hostname)
+					continue
+				}
+			}
+			kept = append(kept, r)
 		}
-		return rules
+		for _, h := range hostnames {
+			kept = upsertRule(kept, lanternRule(h))
+		}
+		return kept
 	})
 }
 
@@ -88,30 +108,58 @@ func (c *Client) AddTunnelRoute(ctx context.Context, hostname string) (cnameID s
 	return cnameID, nil
 }
 
-// RemoveTunnelRoute removes the hostname ingress rule from the tunnel and
-// deletes its CNAME DNS record.
+// RemoveTunnelRoute deletes the hostname's CNAME DNS record and removes its
+// ingress rule from the tunnel. DNS is removed first: if the ingress update
+// fails or times out after the record is gone, no orphaned CNAME is left behind
+// (the periodic sync prunes any leftover rule). Both steps are attempted and
+// their errors combined, so one failure cannot hide the other.
 func (c *Client) RemoveTunnelRoute(ctx context.Context, hostname, cnameID string) error {
 	if !c.TunnelEnabled() {
 		return nil
 	}
-	if err := c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
+	dnsErr := c.deleteTunnelCNAME(ctx, hostname, cnameID)
+	ingressErr := c.modifyIngress(ctx, func(rules []ingressRule) []ingressRule {
 		return removeHostname(rules, hostname)
-	}); err != nil {
-		return fmt.Errorf("remove tunnel route %s: %w", hostname, err)
+	})
+	if ingressErr != nil {
+		ingressErr = fmt.Errorf("remove tunnel route %s: %w", hostname, ingressErr)
 	}
+	return errors.Join(dnsErr, ingressErr)
+}
+
+// deleteTunnelCNAME removes the CNAME at hostname, recovering from a lost or
+// stale stored record ID. A missing record is not an error: the desired end
+// state already holds.
+func (c *Client) deleteTunnelCNAME(ctx context.Context, hostname, cnameID string) error {
 	if cnameID == "" {
-		// Recover from a lost stored record ID by looking the CNAME up by
-		// hostname, so stale records get cleaned up instead of leaked.
-		if recID, _, _ := c.findRecord(ctx, hostname, "CNAME"); recID != "" {
-			cnameID = recID
+		id, _, err := c.findRecord(ctx, hostname, "CNAME")
+		if err != nil {
+			return fmt.Errorf("find CNAME for %s: %w", hostname, err)
+		}
+		if id == "" {
+			return nil
+		}
+		cnameID = id
+	}
+	deleteErr := c.DeleteRecord(ctx, cnameID)
+	if deleteErr == nil {
+		return nil
+	}
+	// The stored ID can be stale (the record was recreated in the dashboard,
+	// or a previous attempt already removed it). If the hostname has no CNAME
+	// any more, cleanup is done; otherwise remove the record that is there.
+	curID, _, findErr := c.findRecord(ctx, hostname, "CNAME")
+	if findErr == nil {
+		if curID == "" {
+			return nil
+		}
+		if curID != cnameID {
+			if err := c.DeleteRecord(ctx, curID); err == nil {
+				return nil
+			}
 		}
 	}
-	if cnameID != "" {
-		if err := c.DeleteRecord(ctx, cnameID); err != nil {
-			return fmt.Errorf("delete CNAME for %s: %w", hostname, err)
-		}
-	}
-	return nil
+	return fmt.Errorf("delete CNAME for %s: %w", hostname, deleteErr)
 }
 
 // ReplaceTunnelRoute atomically removes an old hostname route and adds a new one
@@ -126,15 +174,15 @@ func (c *Client) ReplaceTunnelRoute(ctx context.Context, oldHostname, newHostnam
 	}); err != nil {
 		return "", fmt.Errorf("replace tunnel route %s→%s: %w", oldHostname, newHostname, err)
 	}
-	if oldCNAMEID != "" {
-		if err := c.DeleteRecord(ctx, oldCNAMEID); err != nil {
-			// Log-only: new CNAME creation is more important.
-			log.Printf("cf: delete old CNAME %s: %v", oldHostname, err)
-		}
-	}
-	newCNAMEID, err = c.createCNAME(ctx, newHostname)
+	newCNAMEID, err = c.ensureTunnelCNAME(ctx, newHostname)
 	if err != nil {
 		return "", fmt.Errorf("create CNAME for %s: %w", newHostname, err)
+	}
+	if oldCNAMEID != "" {
+		if err := c.DeleteRecord(ctx, oldCNAMEID); err != nil {
+			// Log-only: the new route is already live.
+			log.Printf("cf: delete old CNAME %s: %v", oldHostname, err)
+		}
 	}
 	return newCNAMEID, nil
 }
@@ -181,14 +229,18 @@ func (c *Client) modifyIngress(ctx context.Context, fn func([]ingressRule) []ing
 		named = append(named, ingressRule{Service: "http_status:404"})
 	}
 
-	_, err = c.api.do(ctx, http.MethodPut,
-		"accounts/"+c.accountID+"/cfd_tunnel/"+c.tunnelID+"/configurations",
-		map[string]any{
-			"config": map[string]any{
-				"ingress": named,
-			},
+	path := "accounts/" + c.accountID + "/cfd_tunnel/" + c.tunnelID + "/configurations"
+	payload := map[string]any{
+		"config": map[string]any{
+			"ingress": named,
 		},
-	)
+	}
+	_, err = c.api.do(ctx, http.MethodPut, path, payload)
+	if err != nil && ctx.Err() == nil {
+		// PUT is idempotent; one immediate retry rides out a transient 5xx or
+		// connection error when the caller's deadline still has budget left.
+		_, err = c.api.do(ctx, http.MethodPut, path, payload)
+	}
 	if err != nil {
 		return fmt.Errorf("update tunnel configuration: %w", err)
 	}
