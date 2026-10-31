@@ -346,9 +346,12 @@ func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, t
 			id, err := s.cf.AddTunnelRoute(ctx, newHostname)
 			if err != nil {
 				log.Printf("web: add tunnel route %s: %v", want.Subdomain, err)
-			} else {
-				return id, newHostname
+				// The ingress rule may already be live in the tunnel, so keep
+				// the old state instead of wiping it: the GUI must not claim
+				// the tunnel is off while Cloudflare still routes it.
+				return old.DNSRecordID, old.TunnelRouteID
 			}
+			return id, newHostname
 		}
 
 	case dnsAToTunnel:
@@ -361,9 +364,9 @@ func (s *Server) reconcileDNS(ctx context.Context, old, want dnsState) (dnsID, t
 			id, err := s.cf.AddTunnelRoute(ctx, newHostname)
 			if err != nil {
 				log.Printf("web: add tunnel route %s: %v", want.Subdomain, err)
-			} else {
-				return id, newHostname
+				return old.DNSRecordID, old.TunnelRouteID
 			}
+			return id, newHostname
 		}
 
 	case dnsTunnelToA:

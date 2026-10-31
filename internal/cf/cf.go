@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"sync"
@@ -109,6 +110,23 @@ func (c *Client) findRecord(ctx context.Context, name, recType string) (recordID
 	return recs[0].ID, recs[0].Content, nil
 }
 
+// findRecords returns every DNS record for name, regardless of type.
+func (c *Client) findRecords(ctx context.Context, name string) ([]dnsRecord, error) {
+	if c.noop {
+		return nil, nil
+	}
+	path := "zones/" + c.zoneID + "/dns_records?name=" + url.QueryEscape(name)
+	result, err := c.api.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("find DNS records %s: %w", name, err)
+	}
+	var recs []dnsRecord
+	if err := json.Unmarshal(result, &recs); err != nil {
+		return nil, fmt.Errorf("decode DNS records: %w", err)
+	}
+	return recs, nil
+}
+
 // UpsertARecord makes sure an unproxied A record for name → ip exists and
 // returns its ID. Creates it if missing, updates the content if changed, and
 // leaves it alone if already correct. Safe to call when the record already exists.
@@ -138,31 +156,53 @@ func (c *Client) EnsureARecord(ctx context.Context, name, ip string) error {
 	return err
 }
 
-// EnsureCNAME makes sure the proxied tunnel CNAME for hostname exists and points
-// at the tunnel, and returns its ID.
+// EnsureCNAME makes sure the proxied tunnel CNAME for hostname exists and
+// points at the tunnel, and returns its ID.
 func (c *Client) EnsureCNAME(ctx context.Context, hostname string) (string, error) {
+	return c.ensureTunnelCNAME(ctx, hostname)
+}
+
+// ensureTunnelCNAME makes sure the proxied tunnel CNAME for hostname exists and
+// points at the tunnel, and returns its ID. No records are removed unless
+// duplicated: an existing record at the hostname — including a stale A/AAAA
+// record that would otherwise block CNAME creation — is rewritten in place
+// (same record ID, one API call) so enabling a tunnel never deletes records.
+func (c *Client) ensureTunnelCNAME(ctx context.Context, hostname string) (string, error) {
 	if c.noop || c.zoneID == "" || c.tunnelID == "" {
 		return "", nil
 	}
 	want := c.tunnelID + ".cfargotunnel.com"
-	recordID, current, err := c.findRecord(ctx, hostname, "CNAME")
+	recs, err := c.findRecords(ctx, hostname)
 	if err != nil {
 		return "", err
 	}
-	if recordID == "" {
+	if len(recs) == 0 {
 		return c.createCNAME(ctx, hostname)
 	}
-	if current == want {
-		return recordID, nil
+	first := recs[0]
+	// Content already correct and it is (or identifies as) a CNAME: leave it.
+	if first.Content == want && (first.Type == "" || first.Type == "CNAME") {
+		return first.ID, nil
 	}
-	_, err = c.api.do(ctx, http.MethodPatch,
-		"zones/"+c.zoneID+"/dns_records/"+recordID,
-		map[string]any{"content": want, "proxied": true},
-	)
-	if err != nil {
+	if _, err := c.api.do(ctx, http.MethodPut,
+		"zones/"+c.zoneID+"/dns_records/"+first.ID,
+		map[string]any{
+			"type":    "CNAME",
+			"name":    hostname,
+			"content": want,
+			"ttl":     1,
+			"proxied": true,
+		},
+	); err != nil {
 		return "", fmt.Errorf("update CNAME %s: %w", hostname, err)
 	}
-	return recordID, nil
+	// Extras at the same name are defunct either way; report but don't fail.
+	for _, extra := range recs[1:] {
+		if err := c.DeleteRecord(ctx, extra.ID); err != nil {
+			log.Printf("cf: remove duplicate record for %s: %v", hostname, err)
+		}
+	}
+	return first.ID, nil
 }
 
 // createDNSRecord posts params to the DNS records endpoint and returns the new record ID.

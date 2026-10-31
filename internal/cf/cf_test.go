@@ -323,6 +323,133 @@ func TestEnsureCNAME(t *testing.T) {
 	}
 }
 
+// ---- AddTunnelRoute / RemoveTunnelRoute ---------------------------------------
+
+// tunnelAndDNSMock serves both the tunnel config and DNS endpoints so
+// AddTunnelRoute can be exercised end to end.
+type tunnelAndDNSMock struct {
+	rules     []ingressRule
+	ingressPUTs int
+	dnsWrites []string  // "METHOD REC_ID" for writes against an existing record
+	creations []string  // "\\t on POST /dns_records
+	deletions []string
+}
+
+func newTunnelAndDNSMock(t *testing.T, initialRules []ingressRule, records []dnsRecord) *tunnelAndDNSMock {
+	t.Helper()
+	m := &tunnelAndDNSMock{rules: initialRules}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/accounts/acct/cfd_tunnel/tid/configurations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			var body struct {
+				Config struct {
+					Ingress []ingressRule `json:"ingress"`
+				} `json:"config"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			m.ingressPUTs++
+			m.rules = body.Config.Ingress
+			_, _ = w.Write(cfOK(map[string]any{}))
+			return
+		}
+		_, _ = w.Write(cfOK(map[string]any{"config": map[string]any{"ingress": m.rules}}))
+	})
+	mux.HandleFunc("/zones/zone1/dns_records", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_, _ = w.Write(cfOK(records))
+		case http.MethodPost:
+			m.creations = append(m.creations, "POST")
+			_, _ = w.Write(cfOK(dnsRecord{ID: "created"}))
+		default:
+			_, _ = w.Write(cfOK(dnsRecord{}))
+		}
+	})
+	mux.HandleFunc("/zones/zone1/dns_records/", func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Path[len("/zones/zone1/dns_records/"):]
+		switch r.Method {
+		case http.MethodDelete:
+			m.deletions = append(m.deletions, id)
+			_, _ = w.Write(cfOK(dnsRecord{}))
+		default:
+			var body dnsRecord
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			m.dnsWrites = append(m.dnsWrites, r.Method+" "+id+" "+body.Type+" "+body.Content)
+			_, _ = w.Write(cfOK(dnsRecord{ID: id}))
+		}
+	})
+	cfServer(t, mux)
+	return m
+}
+
+func TestAddTunnelRoute_AdoptsExistingRecordInPlace(t *testing.T) {
+	// A pre-existing A record (from an old enable attempt) occupies the hostname.
+	m := newTunnelAndDNSMock(t, nil, []dnsRecord{{ID: "rec-a", Type: "A", Content: "5.6.7.8"}})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	id, err := c.AddTunnelRoute(context.Background(), "drive.example.com")
+	if err != nil || id != "rec-a" {
+		t.Fatalf("AddTunnelRoute = (%q, %v), want (rec-a, nil)", id, err)
+	}
+	if len(m.deletions) != 0 {
+		t.Errorf("deletions = %v, want none — enabling must not delete records", m.deletions)
+	}
+	if len(m.creations) != 0 {
+		t.Errorf("creations = %v, want none", m.creations)
+	}
+	if len(m.dnsWrites) != 1 || m.dnsWrites[0] != "PUT rec-a CNAME tid.cfargotunnel.com" {
+		t.Errorf("dnsWrites = %v, want single in-place PUT to CNAME", m.dnsWrites)
+	}
+	if m.ingressPUTs != 1 {
+		t.Errorf("ingressPUTs = %d, want 1", m.ingressPUTs)
+	}
+}
+
+func TestAddTunnelRoute_LeavesCorrectCNAMEAlone(t *testing.T) {
+	// The exact user scenario: CNAME already points at the tunnel from a
+	// previous enable — nothing should be written, but the record ID returned
+	// so the GUI can mark the tunnel as on.
+	m := newTunnelAndDNSMock(t, nil, []dnsRecord{{ID: "rec-c", Type: "CNAME", Content: "tid.cfargotunnel.com"}})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	id, err := c.AddTunnelRoute(context.Background(), "drive.example.com")
+	if err != nil || id != "rec-c" {
+		t.Fatalf("AddTunnelRoute = (%q, %v), want (rec-c, nil)", id, err)
+	}
+	if len(m.dnsWrites) != 0 || len(m.deletions) != 0 || len(m.creations) != 0 {
+		t.Errorf("unexpected writes: writes=%v deletions=%v creations=%v", m.dnsWrites, m.deletions, m.creations)
+	}
+}
+
+func TestAddTunnelRoute_CreatesWhenMissing(t *testing.T) {
+	m := newTunnelAndDNSMock(t, nil, []dnsRecord{})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	id, err := c.AddTunnelRoute(context.Background(), "new.example.com")
+	if err != nil || id != "created" {
+		t.Fatalf("AddTunnelRoute = (%q, %v), want (created, nil)", id, err)
+	}
+	if len(m.creations) != 1 || len(m.deletions) != 0 || len(m.dnsWrites) != 0 {
+		t.Errorf("creations=%v writes=%v deletions=%v, want one create only", m.creations, m.dnsWrites, m.deletions)
+	}
+}
+
+func TestRemoveTunnelRoute_RecoversLostRecordID(t *testing.T) {
+	// Stored record ID was lost ("record was made previously"): disabling must
+	// still find and delete the CNAME by hostname.
+	m := newTunnelAndDNSMock(t, []ingressRule{{
+		Hostname: "drive.example.com", Service: LanternOrigin,
+	}}, []dnsRecord{{ID: "rec-c", Type: "CNAME", Content: "tid.cfargotunnel.com"}})
+	c, _ := New("tok", "zone1", "tid", "acct")
+
+	if err := c.RemoveTunnelRoute(context.Background(), "drive.example.com", ""); err != nil {
+		t.Fatalf("RemoveTunnelRoute: %v", err)
+	}
+	if len(m.deletions) != 1 || m.deletions[0] != "rec-c" {
+		t.Errorf("deletions = %v, want [rec-c]", m.deletions)
+	}
+}
+
 // ---- Tunnel ingress -> Lantern -----------------------------------------------
 
 type tunnelMock struct {

@@ -82,6 +82,7 @@ func (a *apiClient) do(ctx context.Context, method, path string, body any) (json
 
 type dnsRecord struct {
 	ID      string `json:"id"`
+	Type    string `json:"type"`
 	Content string `json:"content"`
 }
 

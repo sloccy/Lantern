@@ -65,7 +65,10 @@ func (c *Client) EnsureTunnelRoutes(ctx context.Context, hostnames []string) err
 
 // AddTunnelRoute adds a hostname ingress rule (to Lantern) and creates the
 // corresponding CNAME DNS record pointing to the tunnel endpoint.
-// Returns the CNAME DNS record ID for later cleanup.
+// Any existing record at the hostname — a stale CNAME left over from a
+// previous enable attempt, or an A/AAAA record that would block the CNAME —
+// is overwritten in place rather than deleted. Returns the CNAME DNS record
+// ID for later cleanup.
 func (c *Client) AddTunnelRoute(ctx context.Context, hostname string) (cnameID string, err error) {
 	if !c.TunnelEnabled() {
 		return "", nil
@@ -75,16 +78,12 @@ func (c *Client) AddTunnelRoute(ctx context.Context, hostname string) (cnameID s
 	}); err != nil {
 		return "", fmt.Errorf("add tunnel route %s: %w", hostname, err)
 	}
-	// Remove any pre-existing DNS record with this hostname before creating the CNAME.
-	// Handles stale A record IDs in the store, pre-existing manual records, etc.
-	if existingID, _, _ := c.FindRecord(ctx, hostname); existingID != "" {
-		if err := c.DeleteRecord(ctx, existingID); err != nil {
-			log.Printf("cf: delete stale record for %s: %v", hostname, err)
-		}
-	}
-	cnameID, err = c.createCNAME(ctx, hostname)
+	cnameID, err = c.ensureTunnelCNAME(ctx, hostname)
 	if err != nil {
 		return "", fmt.Errorf("create CNAME for %s: %w", hostname, err)
+	}
+	if cnameID == "" {
+		return "", fmt.Errorf("create CNAME for %s: no zone configured", hostname)
 	}
 	return cnameID, nil
 }
@@ -99,6 +98,13 @@ func (c *Client) RemoveTunnelRoute(ctx context.Context, hostname, cnameID string
 		return removeHostname(rules, hostname)
 	}); err != nil {
 		return fmt.Errorf("remove tunnel route %s: %w", hostname, err)
+	}
+	if cnameID == "" {
+		// Recover from a lost stored record ID by looking the CNAME up by
+		// hostname, so stale records get cleaned up instead of leaked.
+		if recID, _, _ := c.findRecord(ctx, hostname, "CNAME"); recID != "" {
+			cnameID = recID
+		}
 	}
 	if cnameID != "" {
 		if err := c.DeleteRecord(ctx, cnameID); err != nil {
