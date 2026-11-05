@@ -197,6 +197,7 @@ All configuration is via environment variables.
 | `SCAN_INTERVAL` | `24h` | Background scan interval. Accepts Go duration strings: `6h`, `30m`, etc. |
 | `SCAN_TIMEOUT_MS` | `200` | TCP dial timeout per port during full network scans, in milliseconds. Increase for slow links. |
 | `TRUSTED_PROXIES` | — | Comma-separated IPs/CIDRs (e.g. `10.0.0.0/8`) of another proxy in front of Lantern whose `X-Forwarded-*` headers should be believed. Loopback is always trusted. |
+| `ALLOWED_CLIENTS` | — | Extra IPs/CIDRs allowed to connect. By default only loopback (`cloudflared`), `TRUSTED_PROXIES`, and private, link-local, and CGNAT/Tailscale (`100.64.0.0/10`) peers are served; everyone else gets 403. Checked against the TCP peer, never headers. |
 | `COMPRESSION` | `true` | gzip-compress text/JSON/etc. responses that the backend didn't already compress. Set `false` to disable. |
 | `LOG_REQUESTS` | `false` | Log one line per proxied request (service, path, status, duration, Host mode). |
 | `ADMIN_PASSWORD` | — | Password for the management UI and all write APIs. The read-only homepage stays open. Unset = no login (a warning is logged at startup). |

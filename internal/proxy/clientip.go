@@ -39,6 +39,45 @@ func (h *Handler) trustedIP(ip net.IP) bool {
 	return false
 }
 
+var cgnat = func() *net.IPNet {
+	_, n, _ := net.ParseCIDR("100.64.0.0/10")
+	return n
+}()
+
+// allowedPeer reports whether the TCP peer may use the proxy at all: loopback
+// (cloudflared), TRUSTED_PROXIES, ALLOWED_CLIENTS, or a private, link-local, or
+// CGNAT (Tailscale) address. Only the TCP peer is checked, never headers.
+func (h *Handler) allowedPeer(r *http.Request) bool {
+	ip := net.ParseIP(peerIP(r))
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	if h.trustedIP(ip) || ip.IsPrivate() || ip.IsLinkLocalUnicast() || cgnat.Contains(ip) {
+		return true
+	}
+	for _, n := range h.cfg.AllowedClients {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// RestrictPeers wraps next so only allowed TCP peers reach it; exempt paths
+// (e.g. container health checks) bypass the check.
+func (h *Handler) RestrictPeers(next http.Handler, exempt ...string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.allowedPeer(r) && !slices.Contains(exempt, r.URL.Path) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // viaTunnel reports whether the request came through the Cloudflare tunnel
 // (a trusted peer that vouches for a public client via CF-Connecting-IP).
 func (h *Handler) viaTunnel(r *http.Request) bool {

@@ -24,6 +24,9 @@ type Config struct {
 	// TrustedProxies are extra peers (besides loopback, where the Cloudflare
 	// tunnel connects from) whose X-Forwarded-* / CF-Connecting-IP headers are believed.
 	TrustedProxies []*net.IPNet
+	// AllowedClients are extra source ranges (ALLOWED_CLIENTS) accepted besides
+	// loopback, TrustedProxies, and private/link-local/CGNAT ranges.
+	AllowedClients []*net.IPNet
 	Compression    bool // gzip compressible proxied responses (COMPRESSION=false disables)
 	LogRequests    bool // one log line per proxied request (LOG_REQUESTS=true)
 
@@ -50,6 +53,10 @@ func Load() (*Config, error) {
 		}
 	}
 
+	allowed, err := ParseTrustedProxies(os.Getenv("ALLOWED_CLIENTS"))
+	if err != nil {
+		return nil, fmt.Errorf("ALLOWED_CLIENTS: %w", err)
+	}
 	trusted, err := ParseTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
 	if err != nil {
 		return nil, err
@@ -67,6 +74,7 @@ func Load() (*Config, error) {
 		ScanTimeout:  time.Duration(scanTimeoutMs) * time.Millisecond,
 
 		TrustedProxies: trusted,
+		AllowedClients: allowed,
 		Compression:    os.Getenv("COMPRESSION") != "false",
 		LogRequests:    os.Getenv("LOG_REQUESTS") == "true",
 		AdminPassword:  os.Getenv("ADMIN_PASSWORD"),

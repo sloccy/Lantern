@@ -21,7 +21,7 @@ func compressHandler(t *testing.T, backend http.Handler) *Handler {
 	t.Cleanup(srv.Close)
 	st := newTestStore(t)
 	addSvc(st, srv.URL, "client")
-	return New(&config.Config{Domain: "example.com", Compression: true}, st, http.NotFoundHandler())
+	return New(&config.Config{Domain: "example.com", Compression: true, AllowedClients: mustCIDRs(t, "0.0.0.0/0")}, st, http.NotFoundHandler())
 }
 
 func getVia(t *testing.T, h *Handler, mutate func(*http.Request)) *httptest.ResponseRecorder {
@@ -142,7 +142,7 @@ func TestCompress_Streaming(t *testing.T) {
 
 			st := newTestStore(t)
 			addSvc(st, backend.URL, "client")
-			front := httptest.NewServer(New(&config.Config{Domain: "example.com", Compression: true}, st, http.NotFoundHandler()))
+			front := httptest.NewServer(New(&config.Config{Domain: "example.com", Compression: true, AllowedClients: mustCIDRs(t, "0.0.0.0/0")}, st, http.NotFoundHandler()))
 			defer front.Close()
 
 			req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, front.URL, http.NoBody)
@@ -181,7 +181,7 @@ func TestCompress_DisabledByConfig(t *testing.T) {
 	defer backend.Close()
 	st := newTestStore(t)
 	addSvc(st, backend.URL, "client")
-	h := New(&config.Config{Domain: "example.com"}, st, http.NotFoundHandler()) // Compression off
+	h := New(&config.Config{Domain: "example.com", AllowedClients: mustCIDRs(t, "0.0.0.0/0")}, st, http.NotFoundHandler()) // Compression off
 	if rec := getVia(t, h, nil); rec.Header().Get("Content-Encoding") != "" {
 		t.Error("compression happened although disabled")
 	}

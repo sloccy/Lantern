@@ -24,9 +24,15 @@ func newTestStore(t *testing.T) *store.Store {
 	return st
 }
 
+// testNets covers httptest's default peer (192.0.2.1) and TEST-NET-3 clients.
+func testNets(t *testing.T) []*net.IPNet {
+	t.Helper()
+	return mustCIDRs(t, "192.0.2.0/24,203.0.113.0/24")
+}
+
 func newTestHandler(t *testing.T, st *store.Store, webHandler http.Handler) *Handler {
 	t.Helper()
-	cfg := &config.Config{Domain: "example.com", Compression: true}
+	cfg := &config.Config{Domain: "example.com", Compression: true, AllowedClients: testNets(t)}
 	if webHandler == nil {
 		webHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
@@ -207,7 +213,7 @@ func TestForwardedHeaders_ConfiguredTrustedProxy(t *testing.T) {
 	backend, got := forwardedBackend(t)
 	st := newTestStore(t)
 	addSvc(st, backend.URL, "")
-	cfg := &config.Config{Domain: "example.com", TrustedProxies: mustCIDRs(t, "10.0.0.0/8")}
+	cfg := &config.Config{Domain: "example.com", TrustedProxies: mustCIDRs(t, "10.0.0.0/8"), AllowedClients: testNets(t)}
 	h := New(cfg, st, http.NotFoundHandler())
 
 	rec := httptest.NewRecorder()
@@ -237,7 +243,7 @@ func TestForwardedHeaders_SpoofedXFFPrefixIgnored(t *testing.T) {
 			backend, got := forwardedBackend(t)
 			st := newTestStore(t)
 			addSvc(st, backend.URL, "")
-			cfg := &config.Config{Domain: "example.com", TrustedProxies: mustCIDRs(t, "10.0.0.0/8")}
+			cfg := &config.Config{Domain: "example.com", TrustedProxies: mustCIDRs(t, "10.0.0.0/8"), AllowedClients: testNets(t)}
 			h := New(cfg, st, http.NotFoundHandler())
 
 			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
@@ -687,5 +693,44 @@ func TestErrorPage_HidesBackendDetailFromTunnelVisitors(t *testing.T) {
 	}
 	if body := do("192.168.1.20:5555", ""); !strings.Contains(body, "127.0.0.1:1") {
 		t.Errorf("LAN visitor should see the dial error, got: %s", body)
+	}
+}
+
+func TestAllowedPeer(t *testing.T) {
+	h := &Handler{cfg: &config.Config{}}
+	cases := map[string]bool{
+		"127.0.0.1:1": true, "[::1]:1": true, "192.168.1.5:1": true, "10.0.0.2:1": true,
+		"172.16.0.9:1": true, "100.64.1.1:1": true, "[fd00::1]:1": true, "[fe80::1]:1": true,
+		"[::ffff:192.168.1.5]:1": true, "8.8.8.8:1": false, "[2001:4860::1]:1": false,
+		"100.128.0.1:1": false, "garbage": false,
+	}
+	for addr, want := range cases {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = addr
+		r.Header.Set("Cf-Connecting-Ip", "192.168.1.5") // spoofed header must not matter
+		if got := h.allowedPeer(r); got != want {
+			t.Errorf("allowedPeer(%s) = %v, want %v", addr, got, want)
+		}
+	}
+	_, n, _ := net.ParseCIDR("203.0.113.0/24")
+	h.cfg.AllowedClients = []*net.IPNet{n}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "203.0.113.7:1"
+	if !h.allowedPeer(r) {
+		t.Error("ALLOWED_CLIENTS range not honored")
+	}
+}
+
+func TestSetDefaultSecurityHeaders(t *testing.T) {
+	hdr := http.Header{"X-Frame-Options": {"DENY"}, "Server": {"nginx"}}
+	setDefaultSecurityHeaders(hdr, true)
+	if hdr.Get("X-Frame-Options") != "DENY" {
+		t.Error("backend X-Frame-Options overwritten")
+	}
+	if hdr.Get("Permissions-Policy") != "" {
+		t.Error("Permissions-Policy must not be injected: it breaks camera/mic/location apps")
+	}
+	if hdr.Get("Server") != "" || hdr.Get("X-Content-Type-Options") != "nosniff" || hdr.Get("Strict-Transport-Security") == "" {
+		t.Errorf("unexpected headers: %v", hdr)
 	}
 }

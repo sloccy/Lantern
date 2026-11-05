@@ -103,7 +103,31 @@ func normalizeHost(host string) string {
 	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
+// setDefaultSecurityHeaders adds baseline security headers a backend did not
+// set itself, and strips headers that leak server software.
+func setDefaultSecurityHeaders(hdr http.Header, https bool) {
+	def := func(k, v string) {
+		if hdr.Get(k) == "" {
+			hdr.Set(k, v)
+		}
+	}
+	def("X-Content-Type-Options", "nosniff")
+	def("X-Frame-Options", "SAMEORIGIN")
+	def("Referrer-Policy", "strict-origin-when-cross-origin")
+	if https {
+		// No includeSubDomains: proxied internal services may be plain HTTP.
+		def("Strict-Transport-Security", "max-age=31536000")
+	}
+	hdr.Del("Server")
+	hdr.Del("X-Powered-By")
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !h.allowedPeer(r) {
+		setDefaultSecurityHeaders(w.Header(), r.TLS != nil)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	host := normalizeHost(r.Host)
 
 	switch {
@@ -114,6 +138,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sub := strings.TrimSuffix(host, h.suffix)
 		h.proxySubdomain(w, r, sub)
 	default:
+		setDefaultSecurityHeaders(w.Header(), r.TLS != nil)
 		http.NotFound(w, r)
 	}
 }
@@ -124,6 +149,7 @@ func (h *Handler) proxySubdomain(w http.ResponseWriter, r *http.Request, sub str
 	// and it is a legal Host header byte, so the key would otherwise be
 	// routable by anyone who reads an ID off the dashboard.
 	if sub == "" || strings.HasPrefix(sub, "_") {
+		setDefaultSecurityHeaders(w.Header(), r.TLS != nil)
 		http.NotFound(w, r)
 		return
 	}
@@ -225,6 +251,7 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 			log.Printf("proxy: %s %s %s → %d (%s, host mode %s)", sub, resp.Request.Method, resp.Request.URL.Path, //nolint:gosec // request path logged for diagnosis
 				resp.StatusCode, time.Since(info.start).Round(time.Millisecond), info.mode)
 		}
+		setDefaultSecurityHeaders(resp.Header, resp.Request.Header.Get("X-Forwarded-Proto") == "https")
 		loc := resp.Header.Get("Location")
 		if loc == "" {
 			return nil
@@ -250,6 +277,7 @@ func (h *Handler) buildProxy(sub string, target *url.URL) *httputil.ReverseProxy
 }
 
 func (h *Handler) errorPage(w http.ResponseWriter, code int, msg string) {
+	setDefaultSecurityHeaders(w.Header(), true)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(code)
 	title := "Service Unavailable"

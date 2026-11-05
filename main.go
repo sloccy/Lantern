@@ -152,7 +152,7 @@ func main() {
 	})
 	httpSrv := &http.Server{
 		Addr:              ":80",
-		Handler:           httpMux,
+		Handler:           proxyHandler.RestrictPeers(httpMux, "/healthz"),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
