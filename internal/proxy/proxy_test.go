@@ -705,7 +705,7 @@ func TestAllowedPeer(t *testing.T) {
 		"100.128.0.1:1": false, "garbage": false,
 	}
 	for addr, want := range cases {
-		r := httptest.NewRequest("GET", "/", nil)
+		r := httptest.NewRequestWithContext(t.Context(), "GET", "/", http.NoBody)
 		r.RemoteAddr = addr
 		r.Header.Set("Cf-Connecting-Ip", "192.168.1.5") // spoofed header must not matter
 		if got := h.allowedPeer(r); got != want {
@@ -714,7 +714,7 @@ func TestAllowedPeer(t *testing.T) {
 	}
 	_, n, _ := net.ParseCIDR("203.0.113.0/24")
 	h.cfg.AllowedClients = []*net.IPNet{n}
-	r := httptest.NewRequest("GET", "/", nil)
+	r := httptest.NewRequestWithContext(t.Context(), "GET", "/", http.NoBody)
 	r.RemoteAddr = "203.0.113.7:1"
 	if !h.allowedPeer(r) {
 		t.Error("ALLOWED_CLIENTS range not honored")
