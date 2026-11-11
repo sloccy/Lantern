@@ -126,11 +126,13 @@ func publicOnlyDialContext(ctx context.Context, network, addr string) (net.Conn,
 	return dialChecked(ctx, network, addr, isPrivateIP)
 }
 
-func newFaviconClient(dial func(context.Context, string, string) (net.Conn, error)) *http.Client {
+// newFaviconClient builds a client using dial. skipTLSVerify is only for
+// operator-configured LAN targets, which commonly use self-signed certs.
+func newFaviconClient(dial func(context.Context, string, string) (net.Conn, error), skipTLSVerify bool) *http.Client {
 	return &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // fetching favicons from arbitrary LAN hosts: TLS cert validity is not meaningful
+			TLSClientConfig:   &tls.Config{InsecureSkipVerify: skipTLSVerify}, //nolint:gosec // LAN targets use self-signed certs; public clients pass false
 			DisableKeepAlives: true,
 			DialContext:       dial,
 		},
@@ -149,10 +151,10 @@ func newFaviconClient(dial func(context.Context, string, string) (net.Conn, erro
 var (
 	// faviconClient fetches a target the operator configured: LAN addresses are
 	// allowed, loopback and link-local are not.
-	faviconClient = newFaviconClient(safeDialContext)
+	faviconClient = newFaviconClient(safeDialContext, true)
 	// faviconPublicClient fetches a URL the remote page chose, so it may not
 	// reach private address space at all.
-	faviconPublicClient = newFaviconClient(publicOnlyDialContext)
+	faviconPublicClient = newFaviconClient(publicOnlyDialContext, false)
 )
 
 // FetchFaviconForTarget fetches the page at targetURL, extracts the favicon
