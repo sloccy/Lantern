@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 
 	"lantern/internal/store"
 )
@@ -153,13 +155,6 @@ var (
 	faviconPublicClient = newFaviconClient(publicOnlyDialContext)
 )
 
-var (
-	reFaviconHref     = regexp.MustCompile(`(?i)<link[^>]+rel=["'][^"']*icon[^"']*["'][^>]+href=["']([^"']+)["']`)
-	reFaviconHref2    = regexp.MustCompile(`(?i)<link[^>]+href=["']([^"']+)["'][^>]+rel=["'][^"']*icon[^"']*["']`)
-	reAppleTouchIcon  = regexp.MustCompile(`(?i)<link[^>]+rel=["']apple-touch-icon["'][^>]+href=["']([^"']+)["']`)
-	reAppleTouchIcon2 = regexp.MustCompile(`(?i)<link[^>]+href=["']([^"']+)["'][^>]+rel=["']apple-touch-icon["']`)
-)
-
 // FetchFaviconForTarget fetches the page at targetURL, extracts the favicon
 // link, fetches the favicon, and returns the raw image bytes.
 // Returns nil if no favicon is found or the fetch fails.
@@ -172,8 +167,10 @@ func FetchFaviconForTarget(ctx context.Context, targetURL string) []byte {
 	if err != nil {
 		return nil
 	}
+	setFaviconHeaders(req)
 	resp, err := faviconClient.Do(req)
 	if err != nil {
+		log.Printf("favicon: fetch page %s: %v", safeURL, err)
 		return nil
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -186,10 +183,13 @@ func FetchFaviconForTarget(ctx context.Context, targetURL string) []byte {
 
 // FetchFaviconFromHTML extracts the favicon URL from pre-fetched HTML and
 // fetches the favicon bytes. Use this when the page HTML is already available.
-func FetchFaviconFromHTML(ctx context.Context, html, baseURL string) []byte {
-	ref := extractFaviconURL(html, baseURL)
+func FetchFaviconFromHTML(ctx context.Context, doc, baseURL string) []byte {
+	ref := extractFaviconURL(doc, baseURL)
 	if sameHost(ref, baseURL) {
-		return fetchFaviconBytes(ctx, ref, faviconClient)
+		if data := fetchFaviconBytes(ctx, ref, faviconClient); len(data) > 0 {
+			return data
+		}
+		return fetchFaviconBytes(ctx, resolveRef("/favicon.ico", baseURL), faviconClient)
 	}
 	// The href named another host, so the page — not the operator — picked the
 	// target. It does not get to aim Lantern at private address space; a public
@@ -231,6 +231,11 @@ func FetchAndWriteFavicon(ctx context.Context, st *store.Store, id string) bool 
 	return st.WriteIcon(id, data) == nil
 }
 
+func setFaviconHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Lantern)")
+	req.Header.Set("Accept", "text/html,image/*;q=0.9,*/*;q=0.5")
+}
+
 func fetchFaviconBytes(ctx context.Context, faviconURL string, client *http.Client) []byte {
 	safeURL, err := validateFaviconURL(ctx, faviconURL)
 	if err != nil {
@@ -240,10 +245,14 @@ func fetchFaviconBytes(ctx context.Context, faviconURL string, client *http.Clie
 	if err != nil {
 		return nil
 	}
+	setFaviconHeaders(req)
 	resp, err := client.Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
+			log.Printf("favicon: fetch icon %s: status %d", safeURL, resp.StatusCode)
 			_ = resp.Body.Close()
+		} else {
+			log.Printf("favicon: fetch icon %s: %v", safeURL, err)
 		}
 		return nil
 	}
@@ -255,19 +264,71 @@ func fetchFaviconBytes(ctx context.Context, faviconURL string, client *http.Clie
 	return data
 }
 
-func extractFaviconURL(html, baseURL string) string {
-	// Prefer apple-touch-icon: always a high-quality PNG, no ICO format artifacts.
-	for _, pair := range [][2]*regexp.Regexp{
-		{reAppleTouchIcon, reAppleTouchIcon2},
-		{reFaviconHref, reFaviconHref2},
-	} {
-		for _, re := range pair {
-			if m := re.FindStringSubmatch(html); len(m) >= 2 {
-				return resolveRef(m[1], baseURL)
+func extractFaviconURL(doc, baseURL string) string {
+	var touch, icon, baseHref string
+	z := html.NewTokenizer(strings.NewReader(doc))
+scan:
+	for {
+		switch z.Next() {
+		case html.ErrorToken:
+			break scan
+		case html.EndTagToken:
+			if name, _ := z.TagName(); string(name) == "head" {
+				break scan
+			}
+		case html.StartTagToken, html.SelfClosingTagToken:
+			name, hasAttr := z.TagName()
+			switch string(name) {
+			case "body":
+				break scan
+			case "base":
+				if baseHref == "" {
+					baseHref = tagAttrs(z, hasAttr)["href"]
+				}
+			case "link":
+				attrs := tagAttrs(z, hasAttr)
+				href := strings.TrimSpace(attrs["href"])
+				if href == "" {
+					continue
+				}
+				for _, r := range strings.Fields(strings.ToLower(attrs["rel"])) {
+					switch r {
+					case "apple-touch-icon", "apple-touch-icon-precomposed":
+						if touch == "" {
+							touch = href
+						}
+					case "icon":
+						if icon == "" {
+							icon = href
+						}
+					}
+				}
 			}
 		}
 	}
-	return resolveRef("/favicon.ico", baseURL)
+	// Prefer apple-touch-icon: always a high-quality PNG, no ICO format artifacts.
+	ref := touch
+	if ref == "" {
+		ref = icon
+	}
+	if ref == "" {
+		return resolveRef("/favicon.ico", baseURL)
+	}
+	if baseHref != "" {
+		baseURL = resolveRef(baseHref, baseURL)
+	}
+	return resolveRef(ref, baseURL)
+}
+
+// tagAttrs reads the attributes of the tag the tokenizer is positioned on.
+func tagAttrs(z *html.Tokenizer, hasAttr bool) map[string]string {
+	m := map[string]string{}
+	for hasAttr {
+		var k, v []byte
+		k, v, hasAttr = z.TagAttr()
+		m[strings.ToLower(string(k))] = string(v)
+	}
+	return m
 }
 
 func resolveRef(ref, base string) string {

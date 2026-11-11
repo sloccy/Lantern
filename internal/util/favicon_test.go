@@ -113,3 +113,26 @@ func TestFetchFaviconFromHTML_SameHostRelative(t *testing.T) {
 	}
 	_ = icon
 }
+
+func TestExtractFaviconURL(t *testing.T) {
+	const base = "http://h:1/app/"
+	tests := []struct {
+		name, html, want string
+	}{
+		{"unquoted", `<head><link rel=icon type=image/ico href=assets/x.ico></head>`, "http://h:1/app/assets/x.ico"},
+		{"reversed single quotes", `<head><link href='/i.png' rel='shortcut icon'></head>`, "http://h:1/i.png"},
+		{"touch preferred", `<head><link rel="icon" href="/a.ico"><link rel="apple-touch-icon" href="/t.png"></head>`, "http://h:1/t.png"},
+		{"precomposed", `<head><link rel="apple-touch-icon-precomposed" href="/p.png"></head>`, "http://h:1/p.png"},
+		{"base href", `<head><base href="/static/"><link rel=icon href=i.ico></head>`, "http://h:1/static/i.ico"},
+		{"mask-icon ignored", `<head><link rel="mask-icon" href="/m.svg"></head>`, "http://h:1/favicon.ico"},
+		{"after head ignored", `<head></head><body><link rel="icon" href="/b.ico"></body>`, "http://h:1/favicon.ico"},
+		{"none", `<html></html>`, "http://h:1/favicon.ico"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractFaviconURL(tc.html, base); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
