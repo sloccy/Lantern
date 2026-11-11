@@ -278,6 +278,8 @@ scan:
 			if name, _ := z.TagName(); string(name) == "head" {
 				break scan
 			}
+		case html.TextToken, html.CommentToken, html.DoctypeToken:
+			// Not relevant to finding <link>/<base> tags.
 		case html.StartTagToken, html.SelfClosingTagToken:
 			name, hasAttr := z.TagName()
 			switch string(name) {
@@ -293,7 +295,7 @@ scan:
 				if href == "" {
 					continue
 				}
-				for _, r := range strings.Fields(strings.ToLower(attrs["rel"])) {
+				for r := range strings.FieldsSeq(strings.ToLower(attrs["rel"])) {
 					switch r {
 					case "apple-touch-icon", "apple-touch-icon-precomposed":
 						if touch == "" {
